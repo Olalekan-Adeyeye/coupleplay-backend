@@ -20,26 +20,34 @@ export class UsersService {
   }
 
   async deleteAccount(userId: string) {
-    // Clean up couple link first
-    await this.prisma.couple.updateMany({
-      where: { userAId: userId },
-      data: { userAId: userId, userBId: null },
-    });
-    await this.prisma.couple.updateMany({
-      where: { userBId: userId },
-      data: { userBId: null },
-    });
-
-    // Delete game data
+    // Delete game players for this user (references User directly)
     await this.prisma.gamePlayer.deleteMany({ where: { userId } });
-    await this.prisma.gameRound.deleteMany({
-      where: { room: { couple: { userAId: userId } } },
-    });
-    await this.prisma.gameRoom.deleteMany({
-      where: { couple: { userAId: userId } },
+
+    // Find all couples this user is involved in
+    const couples = await this.prisma.couple.findMany({
+      where: {
+        OR: [{ userAId: userId }, { userBId: userId }],
+      },
     });
 
-    // Delete user
+    // Delete game rounds and rooms for each couple (manual cascade)
+    for (const couple of couples) {
+      await this.prisma.gameRound.deleteMany({
+        where: { room: { coupleId: couple.id } },
+      });
+      await this.prisma.gameRoom.deleteMany({
+        where: { coupleId: couple.id },
+      });
+    }
+
+    // Delete the couple records
+    await this.prisma.couple.deleteMany({
+      where: {
+        OR: [{ userAId: userId }, { userBId: userId }],
+      },
+    });
+
+    // Finally delete the user
     await this.prisma.user.delete({ where: { id: userId } });
     return { ok: true };
   }
