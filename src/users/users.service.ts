@@ -20,9 +20,6 @@ export class UsersService {
   }
 
   async deleteAccount(userId: string) {
-    // Delete game players for this user (references User directly)
-    await this.prisma.gamePlayer.deleteMany({ where: { userId } });
-
     // Find all couples this user is involved in
     const couples = await this.prisma.couple.findMany({
       where: {
@@ -30,17 +27,28 @@ export class UsersService {
       },
     });
 
-    // Delete game rounds and rooms for each couple (manual cascade)
     for (const couple of couples) {
-      await this.prisma.gameRound.deleteMany({
-        where: { room: { coupleId: couple.id } },
-      });
-      await this.prisma.gameRoom.deleteMany({
+      // Delete game players in this couple's rooms first (FK on roomId)
+      const rooms = await this.prisma.gameRoom.findMany({
         where: { coupleId: couple.id },
+        select: { id: true },
       });
+      const roomIds = rooms.map((r) => r.id);
+
+      if (roomIds.length > 0) {
+        await this.prisma.gamePlayer.deleteMany({
+          where: { roomId: { in: roomIds } },
+        });
+        await this.prisma.gameRound.deleteMany({
+          where: { roomId: { in: roomIds } },
+        });
+        await this.prisma.gameRoom.deleteMany({
+          where: { coupleId: couple.id },
+        });
+      }
     }
 
-    // Delete the couple records
+    // Delete couple records
     await this.prisma.couple.deleteMany({
       where: {
         OR: [{ userAId: userId }, { userBId: userId }],
