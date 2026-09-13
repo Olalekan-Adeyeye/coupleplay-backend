@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Param, UseGuards, Req } from '@nestjs/common';
+import { Controller, Get, Post, Delete, Param, UseGuards, Req } from '@nestjs/common';
 import { CouplesService } from './couples.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 
@@ -20,5 +20,10 @@ export class CouplesController {
   @Post('join/:code')
   joinByCode(@Req() req: any, @Param('code') code: string) {
     return this.couplesService.joinByInviteCode(req.user.id, code);
+  }
+
+  @Delete('unlink')
+  unlink(@Req() req: any) {
+    return this.couplesService.unlink(req.user.id);
   }
 }

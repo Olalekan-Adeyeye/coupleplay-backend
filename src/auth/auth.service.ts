@@ -35,6 +35,7 @@ export class AuthService {
         username: dto.username,
         name: dto.name,
         password: hashedPassword,
+        ...(dto.avatar && { avatar: dto.avatar }),
       },
     });
 

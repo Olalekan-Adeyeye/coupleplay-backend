@@ -71,13 +71,15 @@ export class RoomsService {
           roomId,
           userId,
           score: 0,
+          ready: false,
           connected: true,
         },
       });
     } else {
+      // Reset ready flag — player must explicitly ready up in the new session
       player = await this.prisma.gamePlayer.update({
         where: { id: player.id },
-        data: { connected: true },
+        data: { connected: true, ready: false },
       });
     }
 
@@ -92,7 +94,7 @@ export class RoomsService {
   }
 
   async setRoomStatus(roomId: string, status: string) {
-    const valid = ['WAITING', 'READY', 'IN_PROGRESS', 'FINISHED'] as const;
+    const valid = ['WAITING', 'IN_PROGRESS', 'FINISHED'] as const;
     if (!valid.includes(status as any)) {
       return;
     }
@@ -101,5 +103,16 @@ export class RoomsService {
       where: { id: roomId },
       data: { status: status as any },
     });
+  }
+
+  async setConnected(roomId: string, userId: string, connected: boolean) {
+    try {
+      await this.prisma.gamePlayer.update({
+        where: { roomId_userId: { roomId, userId } },
+        data: { connected },
+      });
+    } catch {
+      // Player record may not exist yet — safe to ignore
+    }
   }
 }

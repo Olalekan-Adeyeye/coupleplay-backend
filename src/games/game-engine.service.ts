@@ -235,10 +235,14 @@ export class GameEngineService {
   }
 
   private async persistRound(roomId: string, state: GameStateBase) {
-    await this.prisma.gameRound.update({
-      where: { roomId_roundNumber: { roomId, roundNumber: state.roundNumber } },
-      data: { data: JSON.stringify(state) },
-    });
+    try {
+      await this.prisma.gameRound.update({
+        where: { roomId_roundNumber: { roomId, roundNumber: state.roundNumber } },
+        data: { data: JSON.stringify(state) },
+      });
+    } catch (err) {
+      this.logger.error(`Failed to persist round for room ${roomId}: ${err}`);
+    }
   }
 
   private async persistRoundEnd(
@@ -247,14 +251,18 @@ export class GameEngineService {
     roundNumber: number,
     finished: boolean,
   ) {
-    await this.prisma.gameRound.update({
-      where: { roomId_roundNumber: { roomId, roundNumber } },
-      data: {
-        state: finished ? 'finished' : 'finished',
-        endedAt: new Date(),
-        data: JSON.stringify(state),
-      },
-    });
+    try {
+      await this.prisma.gameRound.update({
+        where: { roomId_roundNumber: { roomId, roundNumber } },
+        data: {
+          state: 'finished',
+          endedAt: new Date(),
+          data: JSON.stringify(state),
+        },
+      });
+    } catch (err) {
+      this.logger.error(`Failed to persist round end for room ${roomId}: ${err}`);
+    }
   }
 
   private async startNextRound(
