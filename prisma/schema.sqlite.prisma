@@ -1,0 +1,86 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  username  String   @unique
+  name      String
+  password  String
+  avatar    String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  coupleAsA  Couple[]     @relation("UserA")
+  coupleAsB  Couple[]     @relation("UserB")
+  gamePlayers GamePlayer[]
+}
+
+model Couple {
+  id         String    @id @default(uuid())
+  userAId    String
+  userBId    String?
+  inviteCode String?   @unique
+  createdAt  DateTime  @default(now())
+
+  userA      User       @relation("UserA", fields: [userAId], references: [id])
+  userB      User?      @relation("UserB", fields: [userBId], references: [id])
+  rooms      GameRoom[]
+
+  @@index([userAId])
+  @@index([userBId])
+}
+
+model GameRoom {
+  id           String   @id @default(uuid())
+  coupleId     String
+  gameType     String
+  status       String   @default("WAITING")
+  currentRound Int      @default(0)
+  totalRounds  Int      @default(5)
+  createdAt    DateTime @default(now())
+  startedAt    DateTime?
+  finishedAt   DateTime?
+
+  couple       Couple       @relation(fields: [coupleId], references: [id])
+  players      GamePlayer[]
+  rounds       GameRound[]
+
+  @@index([coupleId])
+  @@index([status])
+}
+
+model GamePlayer {
+  id        String  @id @default(uuid())
+  roomId    String
+  userId    String
+  score     Int     @default(0)
+  ready     Boolean @default(false)
+  connected Boolean @default(true)
+
+  room      GameRoom @relation(fields: [roomId], references: [id])
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@unique([roomId, userId])
+  @@index([userId])
+}
+
+model GameRound {
+  id          String    @id @default(uuid())
+  roomId      String
+  roundNumber Int
+  state       String    @default("pending")
+  data        String?
+  startedAt   DateTime?
+  endedAt     DateTime?
+
+  room        GameRoom  @relation(fields: [roomId], references: [id])
+
+  @@unique([roomId, roundNumber])
+}

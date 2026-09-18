@@ -3,6 +3,7 @@ import {
   Post,
   Get,
   Param,
+  Query,
   Body,
   UseGuards,
   Req,
@@ -28,8 +29,11 @@ export class RoomsController {
   }
 
   @Get('active/:coupleId')
-  getActive(@Param('coupleId') coupleId: string) {
-    return this.roomsService.getActiveRoom(coupleId);
+  getActive(
+    @Param('coupleId') coupleId: string,
+    @Query('gameType') gameType?: string,
+  ) {
+    return this.roomsService.getActiveRoom(coupleId, gameType);
   }
 
   @Get(':id')

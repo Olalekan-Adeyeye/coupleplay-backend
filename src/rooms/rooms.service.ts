@@ -40,11 +40,12 @@ export class RoomsService {
     return room;
   }
 
-  async getActiveRoom(coupleId: string) {
+  async getActiveRoom(coupleId: string, gameType?: string) {
     return this.prisma.gameRoom.findFirst({
       where: {
         coupleId,
         status: { in: ['WAITING', 'READY', 'IN_PROGRESS'] },
+        ...(gameType ? { gameType } : {}),
       },
     });
   }

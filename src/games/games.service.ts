@@ -21,6 +21,14 @@ export class GamesService {
       maxPlayers: 2,
     },
     {
+      id: 'number-hunt',
+      name: 'Number Hunt',
+      description: 'Find the numbers in the honeycomb!',
+      category: 'Competitive',
+      minPlayers: 2,
+      maxPlayers: 2,
+    },
+    {
       id: 'draw-guess',
       name: 'Draw & Guess',
       description: 'Draw a word and let your partner guess!',

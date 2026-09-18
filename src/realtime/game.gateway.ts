@@ -206,6 +206,15 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       if (state.gameType === 'SPEED_BATTLE' && (state as any).questionDeadline) {
         this.scheduleSpeedBattleTimeout(data.roomId, (state as any).questionDeadline);
       }
+
+      // Schedule number-hunt timer if applicable
+      if (state.gameType === 'NUMBER_HUNT') {
+        const ns = state as any;
+        const deadline = ns.mode === 'hunt' ? ns.roundDeadline : ns.callDeadline;
+        if (deadline) {
+          this.scheduleNumberHuntTimeout(data.roomId, deadline);
+        }
+      }
     }
   }
 
@@ -260,6 +269,21 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     ) {
       this.scheduleSpeedBattleTimeout(data.roomId, (outcome.state as any).questionDeadline);
     }
+
+    // Schedule next number-hunt timer if applicable
+    if (!outcome.finished && outcome.state.gameType === 'NUMBER_HUNT') {
+      const ns = outcome.state as any;
+      const deadline = ns.mode === 'hunt' ? ns.roundDeadline : ns.callDeadline;
+      if (deadline) {
+        this.scheduleNumberHuntTimeout(data.roomId, deadline);
+      } else {
+        this.clearNumberHuntTimer(data.roomId);
+      }
+    }
+
+    if (outcome.finished) {
+      this.clearNumberHuntTimer(data.roomId);
+    }
   }
 
   @SubscribeMessage('game:sync')
@@ -308,6 +332,21 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       (outcome.state as any).questionDeadline
     ) {
       this.scheduleSpeedBattleTimeout(data.roomId, (outcome.state as any).questionDeadline);
+    }
+
+    // Schedule next number-hunt timer
+    if (!outcome.finished && outcome.state.gameType === 'NUMBER_HUNT') {
+      const ns = outcome.state as any;
+      const deadline = ns.mode === 'hunt' ? ns.roundDeadline : ns.callDeadline;
+      if (deadline) {
+        this.scheduleNumberHuntTimeout(data.roomId, deadline);
+      } else {
+        this.clearNumberHuntTimer(data.roomId);
+      }
+    }
+
+    if (outcome.finished) {
+      this.clearNumberHuntTimer(data.roomId);
     }
   }
 
@@ -359,6 +398,9 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // Drop engine state
     this.engineService.dropLive(roomId);
 
+    // Clear timers
+    this.clearNumberHuntTimer(roomId);
+
     this.server.to(roomId).emit('game:abandoned', {
       roomId,
       reason: 'Partner disconnected',
@@ -383,5 +425,32 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }, Math.min(delay, 16_000));
 
     this.speedTimers.set(roomId, timer);
+  }
+
+  /* ── Number Hunt timer ──────────────────────────────────────── */
+
+  private huntTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  private scheduleNumberHuntTimeout(roomId: string, deadline: number) {
+    const existing = this.huntTimers.get(roomId);
+    if (existing) clearTimeout(existing);
+
+    const delay = Math.max(0, deadline - Date.now());
+    const timer = setTimeout(() => {
+      this.handleTimeout(
+        { data: {} } as any,
+        { roomId },
+      );
+    }, Math.min(delay, 35_000));
+
+    this.huntTimers.set(roomId, timer);
+  }
+
+  private clearNumberHuntTimer(roomId: string) {
+    const existing = this.huntTimers.get(roomId);
+    if (existing) {
+      clearTimeout(existing);
+      this.huntTimers.delete(roomId);
+    }
   }
 }
