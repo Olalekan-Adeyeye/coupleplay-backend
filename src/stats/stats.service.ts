@@ -4,11 +4,10 @@ import { PrismaService } from '../database/prisma.service';
 const GAME_ICONS: Record<string, { icon: string; color: string; bg: string }> = {
   TIC_TAC_TOE: { icon: 'grid', color: '#10B981', bg: '#E8F8EF' },
   SPEED_BATTLE: { icon: 'lightning-bolt', color: '#F59E0B', bg: '#FEF3C7' },
-  DRAW_GUESS: { icon: 'brush', color: '#FF69B4', bg: '#FFE4F1' },
-  GAME_NAMES: { icon: 'gamepad-variant', color: '#8C78FF', bg: '#EFEAFF' },
-  MEMORY_MATCH: { icon: 'cards-outline', color: '#22C55E', bg: '#E8F8EF' },
-  WOULD_YOU_RATHER: { icon: 'help-circle-outline', color: '#F59E0B', bg: '#FFF1E4' },
+  NUMBER_HUNT: { icon: 'hexagon', color: '#8B5CF6', bg: '#EDE9FE' },
 };
+
+const DEFAULT_GAME_ICON = { icon: 'gamepad-variant', color: '#946BFF', bg: '#EFEAFF' };
 
 @Injectable()
 export class StatsService {
@@ -75,7 +74,7 @@ export class StatsService {
       const userPlayer = room.players.find((p) => p.userId === userId);
       const partnerPlayer = room.players.find((p) => p.userId !== userId);
 
-      const gameInfo = GAME_ICONS[room.gameType] || GAME_ICONS.GAME_NAMES;
+      const gameInfo = GAME_ICONS[room.gameType] || DEFAULT_GAME_ICON;
       let title = '';
       let icon = gameInfo.icon;
       let color = gameInfo.color;
@@ -164,8 +163,8 @@ export class StatsService {
     });
 
     const overview = await this.getOverview(coupleId, userId);
+    const winStreak = this.calculateWinStreak(rooms, userId);
 
-    const winsByGameType: Record<string, number> = {};
     let perfectGames = 0;
     const gameTypesPlayed = new Set<string>();
     let nightOwl = false;
@@ -175,10 +174,6 @@ export class StatsService {
     for (const room of rooms) {
       const userPlayer = room.players.find((p) => p.userId === userId);
       const partnerPlayer = room.players.find((p) => p.userId !== userId);
-
-      if (userPlayer && partnerPlayer && userPlayer.score > partnerPlayer.score) {
-        winsByGameType[room.gameType] = (winsByGameType[room.gameType] || 0) + 1;
-      }
 
       gameTypesPlayed.add(room.gameType);
 
@@ -262,9 +257,9 @@ export class StatsService {
         icon: 'fire',
         color: '#F59E0B',
         category: 'milestone',
-        condition: overview.streak >= 3,
-        progress: Math.min(100, (overview.streak / 3) * 100),
-        unlockedAt: overview.streak >= 3 ? rooms[0]?.finishedAt?.toISOString() ?? null : null,
+        condition: winStreak >= 3,
+        progress: Math.min(100, (winStreak / 3) * 100),
+        unlockedAt: winStreak >= 3 ? rooms[0]?.finishedAt?.toISOString() ?? null : null,
       },
       {
         id: 'unstoppable',
@@ -273,9 +268,9 @@ export class StatsService {
         icon: 'fire',
         color: '#EF4444',
         category: 'milestone',
-        condition: overview.streak >= 7,
-        progress: Math.min(100, (overview.streak / 7) * 100),
-        unlockedAt: overview.streak >= 7 ? rooms[0]?.finishedAt?.toISOString() ?? null : null,
+        condition: winStreak >= 7,
+        progress: Math.min(100, (winStreak / 7) * 100),
+        unlockedAt: winStreak >= 7 ? rooms[0]?.finishedAt?.toISOString() ?? null : null,
       },
       {
         id: 'xp_hunter',
@@ -310,61 +305,50 @@ export class StatsService {
         progress: Math.min(100, (overview.xp / 1000) * 100),
         unlockedAt: overview.xp >= 1000 ? this.findUnlockDateByXp(rooms, userId, 1000) : null,
       },
-      // Game-specific
+      // Win milestones
       {
-        id: 'tic_tac_toe_master',
-        name: 'Tic Tac Toe Master',
-        description: 'Win 5 Tic Tac Toe games',
-        icon: 'grid',
-        color: '#10B981',
-        category: 'game',
-        condition: (winsByGameType['TIC_TAC_TOE'] || 0) >= 5,
-        progress: Math.min(100, ((winsByGameType['TIC_TAC_TOE'] || 0) / 5) * 100),
-        unlockedAt: (winsByGameType['TIC_TAC_TOE'] || 0) >= 5 ? this.findUnlockDateByGame(rooms, userId, 'TIC_TAC_TOE', 5) : null,
-      },
-      {
-        id: 'artistic_soul',
-        name: 'Artistic Soul',
-        description: 'Win 5 Draw & Guess games',
-        icon: 'brush',
-        color: '#FF69B4',
-        category: 'game',
-        condition: (winsByGameType['DRAW_GUESS'] || 0) >= 5,
-        progress: Math.min(100, ((winsByGameType['DRAW_GUESS'] || 0) / 5) * 100),
-        unlockedAt: (winsByGameType['DRAW_GUESS'] || 0) >= 5 ? this.findUnlockDateByGame(rooms, userId, 'DRAW_GUESS', 5) : null,
-      },
-      {
-        id: 'speed_demon',
-        name: 'Speed Demon',
-        description: 'Win 5 Speed Battle games',
-        icon: 'lightning-bolt',
-        color: '#F59E0B',
-        category: 'game',
-        condition: (winsByGameType['SPEED_BATTLE'] || 0) >= 5,
-        progress: Math.min(100, ((winsByGameType['SPEED_BATTLE'] || 0) / 5) * 100),
-        unlockedAt: (winsByGameType['SPEED_BATTLE'] || 0) >= 5 ? this.findUnlockDateByGame(rooms, userId, 'SPEED_BATTLE', 5) : null,
-      },
-      {
-        id: 'memory_wizard',
-        name: 'Memory Wizard',
-        description: 'Win 5 Memory Match games',
-        icon: 'cards-outline',
+        id: 'rookie_winner',
+        name: 'Rookie Winner',
+        description: 'Win your first game',
+        icon: 'trophy-outline',
         color: '#22C55E',
-        category: 'game',
-        condition: (winsByGameType['MEMORY_MATCH'] || 0) >= 5,
-        progress: Math.min(100, ((winsByGameType['MEMORY_MATCH'] || 0) / 5) * 100),
-        unlockedAt: (winsByGameType['MEMORY_MATCH'] || 0) >= 5 ? this.findUnlockDateByGame(rooms, userId, 'MEMORY_MATCH', 5) : null,
+        category: 'milestone',
+        condition: overview.wins >= 1,
+        progress: Math.min(100, overview.wins * 100),
+        unlockedAt: overview.wins >= 1 ? this.findNthWinDate(rooms, userId, 1) : null,
       },
       {
-        id: 'decision_maker',
-        name: 'Decision Maker',
-        description: 'Win 5 Would You Rather games',
-        icon: 'help-circle-outline',
+        id: 'sharpshooter',
+        name: 'Sharpshooter',
+        description: 'Win 10 games',
+        icon: 'crosshairs',
         color: '#F59E0B',
-        category: 'game',
-        condition: (winsByGameType['WOULD_YOU_RATHER'] || 0) >= 5,
-        progress: Math.min(100, ((winsByGameType['WOULD_YOU_RATHER'] || 0) / 5) * 100),
-        unlockedAt: (winsByGameType['WOULD_YOU_RATHER'] || 0) >= 5 ? this.findUnlockDateByGame(rooms, userId, 'WOULD_YOU_RATHER', 5) : null,
+        category: 'milestone',
+        condition: overview.wins >= 10,
+        progress: Math.min(100, (overview.wins / 10) * 100),
+        unlockedAt: overview.wins >= 10 ? this.findNthWinDate(rooms, userId, 10) : null,
+      },
+      {
+        id: 'champion',
+        name: 'Champion',
+        description: 'Win 25 games',
+        icon: 'crown',
+        color: '#8A4BE0',
+        category: 'milestone',
+        condition: overview.wins >= 25,
+        progress: Math.min(100, (overview.wins / 25) * 100),
+        unlockedAt: overview.wins >= 25 ? this.findNthWinDate(rooms, userId, 25) : null,
+      },
+      {
+        id: 'dominator',
+        name: 'Dominator',
+        description: 'Win 50 games',
+        icon: 'shield-crown',
+        color: '#EF4444',
+        category: 'milestone',
+        condition: overview.wins >= 50,
+        progress: Math.min(100, (overview.wins / 50) * 100),
+        unlockedAt: overview.wins >= 50 ? this.findNthWinDate(rooms, userId, 50) : null,
       },
       // Special
       {
@@ -414,13 +398,13 @@ export class StatsService {
       {
         id: 'game_variety',
         name: 'Game Variety',
-        description: 'Play all 6 game types',
+        description: 'Play all 3 game types',
         icon: 'shape',
         color: '#22C55E',
         category: 'special',
-        condition: gameTypesPlayed.size >= 6,
-        progress: Math.min(100, (gameTypesPlayed.size / 6) * 100),
-        unlockedAt: gameTypesPlayed.size >= 6 ? this.findVarietyUnlockDate(rooms) : null,
+        condition: gameTypesPlayed.size >= 3,
+        progress: Math.min(100, (gameTypesPlayed.size / 3) * 100),
+        unlockedAt: gameTypesPlayed.size >= 3 ? this.findVarietyUnlockDate(rooms) : null,
       },
     ];
 
@@ -449,15 +433,14 @@ export class StatsService {
     return null;
   }
 
-  private findUnlockDateByGame(rooms: any[], userId: string, gameType: string, targetWins: number): string | null {
+  private findNthWinDate(rooms: any[], userId: string, n: number): string | null {
     let wins = 0;
     for (const room of [...rooms].reverse()) {
-      if (room.gameType !== gameType) continue;
       const userPlayer = room.players.find((p: any) => p.userId === userId);
       const partnerPlayer = room.players.find((p: any) => p.userId !== userId);
       if (userPlayer && partnerPlayer && userPlayer.score > partnerPlayer.score) {
         wins++;
-        if (wins >= targetWins) {
+        if (wins >= n) {
           return room.finishedAt?.toISOString() ?? null;
         }
       }
@@ -506,7 +489,7 @@ export class StatsService {
     const gameTypes = new Set<string>();
     for (const room of [...rooms].reverse()) {
       gameTypes.add(room.gameType);
-      if (gameTypes.size >= 6) {
+      if (gameTypes.size >= 3) {
         return room.finishedAt?.toISOString() ?? null;
       }
     }
@@ -536,6 +519,20 @@ export class StatsService {
       checkDate.setDate(checkDate.getDate() - 1);
     }
 
+    return streak;
+  }
+
+  private calculateWinStreak(rooms: any[], userId: string): number {
+    let streak = 0;
+    for (const room of rooms) {
+      const userPlayer = room.players.find((p: any) => p.userId === userId);
+      const partnerPlayer = room.players.find((p: any) => p.userId !== userId);
+      if (userPlayer && partnerPlayer && userPlayer.score > partnerPlayer.score) {
+        streak++;
+      } else {
+        break;
+      }
+    }
     return streak;
   }
 

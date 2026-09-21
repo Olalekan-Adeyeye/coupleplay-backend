@@ -9,7 +9,13 @@ import { PrismaService } from '../database/prisma.service';
 export class RoomsService {
   constructor(private prisma: PrismaService) {}
 
-  async createRoom(coupleId: string, gameType: string, totalRounds: number) {
+  async createRoom(coupleId: string, gameType: string, totalRounds: number, userId: string) {
+    const couple = await this.prisma.couple.findUnique({ where: { id: coupleId } });
+    if (!couple) throw new NotFoundException('Couple not found');
+    if (couple.userAId !== userId && couple.userBId !== userId) {
+      throw new ForbiddenException('Not a member of this couple');
+    }
+
     return this.prisma.gameRoom.create({
       data: {
         coupleId,

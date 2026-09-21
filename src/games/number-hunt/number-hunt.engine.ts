@@ -28,6 +28,7 @@ export interface NumberHuntState extends GameStateBase {
   totalCalls: number;
   callDeadline: number | null;
   firstTapped: Record<string, { number: number; tappedAt: number } | null>;
+  roundRaceScores: Record<string, number>;
 }
 
 /* ── Actions ─────────────────────────────────────────────────────── */
@@ -118,6 +119,7 @@ export class NumberHuntEngine
       totalCalls: RACE_TOTAL_CALLS,
       callDeadline: null,
       firstTapped: Object.fromEntries(players.map((p) => [p.userId, null])),
+      roundRaceScores: Object.fromEntries(players.map((p) => [p.userId, 0])),
     };
   }
 
@@ -162,6 +164,7 @@ export class NumberHuntEngine
       totalCalls: RACE_TOTAL_CALLS,
       callDeadline: firstDeadline,
       firstTapped: Object.fromEntries(players.map((p) => [p.userId, null])),
+      roundRaceScores: Object.fromEntries(players.map((p) => [p.userId, 0])),
       roundWinnerId: null,
       turnUserId: currentMode === 'hunt' ? pickerId : null,
       scores,
@@ -342,6 +345,10 @@ export class NumberHuntEngine
       scores[playerId] = (scores[playerId] ?? 0) + 1;
       next.scores = scores;
 
+      const roundRaceScores = { ...next.roundRaceScores };
+      roundRaceScores[playerId] = (roundRaceScores[playerId] ?? 0) + 1;
+      next.roundRaceScores = roundRaceScores;
+
       // Check if both players have tapped
       const bothTapped = Object.values(firstTapped).every((v) => v != null);
       if (bothTapped) {
@@ -356,6 +363,10 @@ export class NumberHuntEngine
     const scores = { ...next.scores };
     scores[playerId] = Math.max(0, (scores[playerId] ?? 0) - 1);
     next.scores = scores;
+
+    const roundRaceScores = { ...next.roundRaceScores };
+    roundRaceScores[playerId] = Math.max(0, (roundRaceScores[playerId] ?? 0) - 1);
+    next.roundRaceScores = roundRaceScores;
 
     // Check if both players have tapped (even wrong ones)
     const bothTapped = Object.values(firstTapped).every((v) => v != null);
@@ -393,7 +404,7 @@ export class NumberHuntEngine
   }
 
   private endRaceRound(state: NumberHuntState): NumberHuntState {
-    const entries = Object.entries(state.scores);
+    const entries = Object.entries(state.roundRaceScores);
     if (entries.length < 2) {
       return {
         ...state,

@@ -7,6 +7,7 @@ import { RoomsModule } from './rooms/rooms.module';
 import { GamesModule } from './games/games.module';
 import { RealtimeModule } from './realtime/realtime.module';
 import { DatabaseModule } from './database/database.module';
+import { StatsModule } from './stats/stats.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { DatabaseModule } from './database/database.module';
     RoomsModule,
     GamesModule,
     RealtimeModule,
+    StatsModule,
   ],
 })
 export class AppModule {}

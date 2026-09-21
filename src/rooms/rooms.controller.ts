@@ -25,6 +25,7 @@ export class RoomsController {
       body.coupleId,
       body.gameType,
       body.totalRounds ?? 5,
+      req.user.id,
     );
   }
 

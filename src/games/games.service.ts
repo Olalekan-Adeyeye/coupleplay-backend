@@ -13,26 +13,26 @@ export interface GameDefinition {
 export class GamesService {
   private games: GameDefinition[] = [
     {
-      id: 'speed-battle',
+      id: 'TIC_TAC_TOE',
+      name: 'Tic Tac Toe',
+      description: 'Three in a row. Loser owes a kiss.',
+      category: 'Classic',
+      minPlayers: 2,
+      maxPlayers: 2,
+    },
+    {
+      id: 'SPEED_BATTLE',
       name: 'Speed Battle',
-      description: 'Race to answer first!',
+      description: 'First correct answer takes the point.',
       category: 'Competitive',
       minPlayers: 2,
       maxPlayers: 2,
     },
     {
-      id: 'number-hunt',
+      id: 'NUMBER_HUNT',
       name: 'Number Hunt',
-      description: 'Find the numbers in the honeycomb!',
+      description: 'Spot the numbers. Beat the clock. Outsmart your partner.',
       category: 'Competitive',
-      minPlayers: 2,
-      maxPlayers: 2,
-    },
-    {
-      id: 'draw-guess',
-      name: 'Draw & Guess',
-      description: 'Draw a word and let your partner guess!',
-      category: 'Creative',
       minPlayers: 2,
       maxPlayers: 2,
     },

@@ -132,6 +132,7 @@ export class GameEngineService {
         where: { id: roomId },
         data: { status: 'FINISHED', finishedAt: new Date() },
       });
+      await this.persistScores(roomId, next);
       this.live.delete(roomId);
     } else if (roundEnded) {
       broadcastState = await this.startNextRound(roomId, next);
@@ -188,6 +189,7 @@ export class GameEngineService {
         where: { id: roomId },
         data: { status: 'FINISHED', finishedAt: new Date() },
       });
+      await this.persistScores(roomId, next);
       this.live.delete(roomId);
     } else if (roundEnded) {
       broadcastState = await this.startNextRound(roomId, next);
@@ -262,6 +264,23 @@ export class GameEngineService {
       });
     } catch (err) {
       this.logger.error(`Failed to persist round end for room ${roomId}: ${err}`);
+    }
+  }
+
+  private async persistScores(roomId: string, state: GameStateBase) {
+    try {
+      const scoreEntries = Object.entries(state.scores);
+      if (scoreEntries.length === 0) return;
+      await Promise.all(
+        scoreEntries.map(([userId, score]) =>
+          this.prisma.gamePlayer.update({
+            where: { roomId_userId: { roomId, userId } },
+            data: { score },
+          }),
+        ),
+      );
+    } catch (err) {
+      this.logger.error(`Failed to persist scores for room ${roomId}: ${err}`);
     }
   }
 

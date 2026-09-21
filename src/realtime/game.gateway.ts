@@ -114,6 +114,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       data.coupleId,
       data.gameType as any,
       data.totalRounds ?? 5,
+      userId,
     );
     client.join(room.id);
     client.emit('room:created', room);
@@ -399,6 +400,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.engineService.dropLive(roomId);
 
     // Clear timers
+    this.clearSpeedBattleTimer(roomId);
     this.clearNumberHuntTimer(roomId);
 
     this.server.to(roomId).emit('game:abandoned', {
@@ -425,6 +427,14 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }, Math.min(delay, 16_000));
 
     this.speedTimers.set(roomId, timer);
+  }
+
+  private clearSpeedBattleTimer(roomId: string) {
+    const existing = this.speedTimers.get(roomId);
+    if (existing) {
+      clearTimeout(existing);
+      this.speedTimers.delete(roomId);
+    }
   }
 
   /* ── Number Hunt timer ──────────────────────────────────────── */

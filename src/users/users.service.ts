@@ -6,17 +6,26 @@ export class UsersService {
   constructor(private prisma: PrismaService) {}
 
   async findById(id: string) {
-    const user = await this.prisma.user.findUnique({ where: { id } });
+    const user = await this.prisma.user.findUnique({
+      where: { id },
+      select: { id: true, email: true, username: true, name: true, avatar: true, createdAt: true, updatedAt: true },
+    });
     if (!user) throw new NotFoundException('User not found');
     return user;
   }
 
   async findByUsername(username: string) {
-    return this.prisma.user.findUnique({ where: { username } });
+    return this.prisma.user.findUnique({
+      where: { username },
+      select: { id: true, email: true, username: true, name: true, avatar: true, createdAt: true, updatedAt: true },
+    });
   }
 
   async findByEmail(email: string) {
-    return this.prisma.user.findUnique({ where: { email } });
+    return this.prisma.user.findUnique({
+      where: { email },
+      select: { id: true, email: true, username: true, name: true, avatar: true, createdAt: true, updatedAt: true },
+    });
   }
 
   async deleteAccount(userId: string) {
