@@ -174,6 +174,7 @@ export class TicTacToeEngine
 
   isFinished(state: TicTacToeState): boolean {
     if (state.status === 'finished') return true;
+    if (state.totalRounds > 0 && state.roundNumber >= state.totalRounds) return true;
     // Best-of-N: enough wins that the trailing player can't catch up.
     const wins = Object.values(state.roundsWon);
     if (wins.length < 2) return false;

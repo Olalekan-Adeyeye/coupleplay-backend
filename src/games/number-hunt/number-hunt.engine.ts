@@ -445,17 +445,27 @@ export class NumberHuntEngine
     if (state.status !== 'active') return state;
 
     if (state.mode === 'hunt') {
+      if (state.roundDeadline === null || Date.now() < state.roundDeadline) {
+        return state;
+      }
       return this.endHuntRound(state);
     }
 
-    // Race mode: advance to next call or end round
-    return this.advanceRaceCall(state);
+    if (state.mode === 'race') {
+      if (state.callDeadline === null || Date.now() < state.callDeadline) {
+        return state;
+      }
+      return this.advanceRaceCall(state);
+    }
+
+    return state;
   }
 
   /* ── Lifecycle ─────────────────────────────────────────────── */
 
   isFinished(state: NumberHuntState): boolean {
     if (state.status === 'finished') return true;
+    if (state.totalRounds > 0 && state.roundNumber >= state.totalRounds) return true;
     const wins = Object.values(state.roundsWon);
     if (wins.length < 2) return false;
     const maxWins = Math.max(...wins);

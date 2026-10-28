@@ -56,6 +56,9 @@ export interface MultiplayerGame<S extends GameStateBase, A extends GameAction> 
 
   handleAction(state: S, playerId: string, action: A): S;
 
+  /** Apply a deadline expiry. Must reject calls made before the actual deadline. */
+  tickExpired?(state: S): S;
+
   isFinished(state: S): boolean;
 
   getResults(state: S): GameResult;

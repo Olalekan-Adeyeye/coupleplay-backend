@@ -137,9 +137,12 @@ export class SpeedBattleEngine
     return next;
   }
 
-  /** Called by the engine service when the timer expires. */
+  /** Called by the engine service once the question deadline has passed. */
   tickExpired(state: SpeedBattleState): SpeedBattleState {
     if (state.status !== 'active') return state;
+    if (state.questionDeadline === null || Date.now() < state.questionDeadline) {
+      return state;
+    }
     return this.endRound(state);
   }
 
@@ -162,6 +165,9 @@ export class SpeedBattleEngine
 
   isFinished(state: SpeedBattleState): boolean {
     if (state.status === 'finished') return true;
+    if (state.totalRounds > 0 && state.roundNumber >= state.totalRounds) return true;
+    // No more questions to play — the question pool exhausted early.
+    if (state.currentQuestionIndex >= state.questions.length - 1) return true;
     const wins = Object.values(state.roundsWon);
     if (wins.length < 2) return false;
     const maxWins = Math.max(...wins);
