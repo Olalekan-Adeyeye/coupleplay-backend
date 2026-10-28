@@ -1,4 +1,5 @@
 import { Controller, Get, Post, Delete, Param, UseGuards, Req } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { CouplesService } from './couples.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 
@@ -17,6 +18,7 @@ export class CouplesController {
     return this.couplesService.generateInviteCode(req.user.id);
   }
 
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post('join/:code')
   joinByCode(@Req() req: any, @Param('code') code: string) {
     return this.couplesService.joinByInviteCode(req.user.id, code);
