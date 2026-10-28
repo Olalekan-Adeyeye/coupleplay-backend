@@ -27,6 +27,7 @@ export interface GameResult {
   gameType: string;
   winnerId: string | null;
   scores: Record<string, number>;
+  roundsWon: Record<string, number>;
   totalRounds: number;
 }
 
@@ -55,6 +56,12 @@ export interface MultiplayerGame<S extends GameStateBase, A extends GameAction> 
   startNextRound(prevState: S, roomId: string, players: RoomPlayer[]): S;
 
   handleAction(state: S, playerId: string, action: A): S;
+
+  /**
+   * Whether the round has reached its terminal state — every player has
+   * acted or the deadline has passed. Must be false while a round is open.
+   */
+  isRoundOver(state: S): boolean;
 
   /** Apply a deadline expiry. Must reject calls made before the actual deadline. */
   tickExpired?(state: S): S;

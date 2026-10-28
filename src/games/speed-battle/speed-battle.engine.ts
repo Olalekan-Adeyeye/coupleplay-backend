@@ -5,10 +5,7 @@ import {
   MultiplayerGame,
   RoomPlayer,
 } from '../game.types';
-import {
-  SpeedBattleQuestion,
-  SPEED_BATTLE_QUESTIONS,
-} from './speed-battle-questions';
+import { pickSpeedBattleQuestions } from './speed-battle-questions';
 
 export interface SpeedBattleState extends GameStateBase {
   currentQuestionIndex: number;
@@ -26,11 +23,6 @@ export interface SpeedBattleAnswerAction extends GameAction {
 
 const ANSWER_TIME_MS = 15_000;
 
-function pickQuestions(count: number): SpeedBattleQuestion[] {
-  const shuffled = [...SPEED_BATTLE_QUESTIONS].sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, Math.min(count, shuffled.length));
-}
-
 export class SpeedBattleEngine
   implements MultiplayerGame<SpeedBattleState, SpeedBattleAnswerAction>
 {
@@ -41,7 +33,7 @@ export class SpeedBattleEngine
     players: RoomPlayer[],
     totalRounds: number,
   ): SpeedBattleState {
-    const questions = pickQuestions(totalRounds);
+    const questions = pickSpeedBattleQuestions(totalRounds);
     const scores: Record<string, number> = {};
     const roundsWon: Record<string, number> = {};
     for (const p of players) {
@@ -104,13 +96,20 @@ export class SpeedBattleEngine
     if (state.questionDeadline && Date.now() > state.questionDeadline) return state;
 
     const { optionIndex } = action.payload ?? {};
-    if (optionIndex == null) return state;
 
     // Already answered this question
     if (state.answers[playerId] != null) return state;
 
     const question = state.questions[state.currentQuestionIndex];
     if (!question) return state;
+
+    if (
+      !Number.isInteger(optionIndex) ||
+      optionIndex < 0 ||
+      optionIndex >= question.options.length
+    ) {
+      return state;
+    }
 
     const correct = optionIndex === question.correctIndex;
     const now = Date.now();
@@ -163,6 +162,10 @@ export class SpeedBattleEngine
     return next;
   }
 
+  isRoundOver(state: SpeedBattleState): boolean {
+    return state.questionDeadline === null;
+  }
+
   isFinished(state: SpeedBattleState): boolean {
     if (state.status === 'finished') return true;
     if (state.totalRounds > 0 && state.roundNumber >= state.totalRounds) return true;
@@ -188,6 +191,7 @@ export class SpeedBattleEngine
       gameType: this.gameType,
       winnerId,
       scores: { ...state.scores },
+      roundsWon: { ...state.roundsWon },
       totalRounds: state.totalRounds,
     };
   }

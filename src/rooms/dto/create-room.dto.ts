@@ -1,5 +1,6 @@
 import { IsInt, IsOptional, IsUUID, Max, Min } from 'class-validator';
 import { IsGameType } from '../../common/validators/is-game-type.validator';
+import { MAX_GAME_ROUNDS } from '../../common/constants';
 
 export class CreateRoomDto {
   @IsUUID()
@@ -11,6 +12,6 @@ export class CreateRoomDto {
   @IsOptional()
   @IsInt()
   @Min(1)
-  @Max(15)
+  @Max(MAX_GAME_ROUNDS)
   totalRounds?: number;
 }

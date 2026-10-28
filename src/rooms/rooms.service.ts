@@ -5,6 +5,8 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
+import { GAME_ENGINES } from '../games/game-registry';
+import { MAX_GAME_ROUNDS } from '../common/constants';
 
 const VALID_STATUSES = ['WAITING', 'IN_PROGRESS', 'FINISHED'] as const;
 
@@ -19,11 +21,20 @@ export class RoomsService {
       throw new ForbiddenException('Not a member of this couple');
     }
 
+    if (!(gameType in GAME_ENGINES)) {
+      throw new BadRequestException(`Unknown game type: ${gameType}`);
+    }
+
+    const rounds = totalRounds ?? 5;
+    if (!Number.isInteger(rounds) || rounds < 1 || rounds > MAX_GAME_ROUNDS) {
+      throw new BadRequestException(`totalRounds must be between 1 and ${MAX_GAME_ROUNDS}`);
+    }
+
     return this.prisma.gameRoom.create({
       data: {
         coupleId,
         gameType,
-        totalRounds,
+        totalRounds: rounds,
         status: 'WAITING',
         currentRound: 0,
       },
@@ -103,23 +114,25 @@ export class RoomsService {
       where: { roomId_userId: { roomId, userId } },
     });
 
-    if (!player) {
-      return this.prisma.gamePlayer.create({
-        data: {
-          roomId,
-          userId,
-          score: 0,
-          ready: false,
-          connected: true,
-        },
+    if (player) {
+      const reconnected = room.status === 'IN_PROGRESS';
+      await this.prisma.gamePlayer.update({
+        where: { id: player.id },
+        data: { connected: true, ready: reconnected ? player.ready : false },
       });
+      return { reconnected };
     }
 
-    // Reset ready flag — player must explicitly ready up in the new session
-    return this.prisma.gamePlayer.update({
-      where: { id: player.id },
-      data: { connected: true, ready: false },
+    await this.prisma.gamePlayer.create({
+      data: {
+        roomId,
+        userId,
+        score: 0,
+        ready: false,
+        connected: true,
+      },
     });
+    return { reconnected: false };
   }
 
   async playerReady(roomId: string, userId: string) {

@@ -172,6 +172,10 @@ export class TicTacToeEngine
     return next;
   }
 
+  isRoundOver(state: TicTacToeState): boolean {
+    return state.turnUserId === null;
+  }
+
   isFinished(state: TicTacToeState): boolean {
     if (state.status === 'finished') return true;
     if (state.totalRounds > 0 && state.roundNumber >= state.totalRounds) return true;
@@ -187,6 +191,7 @@ export class TicTacToeEngine
       gameType: this.gameType,
       winnerId: state.winnerId ?? this.computeWinnerId(state),
       scores: { ...state.scores },
+      roundsWon: { ...state.roundsWon },
       totalRounds: state.totalRounds,
     };
   }

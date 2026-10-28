@@ -9,6 +9,7 @@ import {
 } from './game.types';
 import { SpeedBattleState } from './speed-battle/speed-battle.engine';
 import { NumberHuntState } from './number-hunt/number-hunt.engine';
+import { MemoryMatchState } from './memory-match/memory-match.engine';
 
 export interface ActionOutcome {
   state: GameStateBase;
@@ -163,7 +164,7 @@ export class GameEngineService {
     engine: MultiplayerGame<GameStateBase, GameAction>,
     next: GameStateBase,
   ): Promise<ActionOutcome> {
-    const roundEnded = next.roundWinnerId !== null || this.isRoundOver(next);
+    const roundEnded = engine.isRoundOver(next);
     const endedRoundNumber = next.roundNumber;
     const finished = roundEnded && engine.isFinished(next);
 
@@ -222,6 +223,9 @@ export class GameEngineService {
     if (view.gameType === 'NUMBER_HUNT') {
       return this.sanitizeNumberHunt(userId, view as NumberHuntState);
     }
+    if (view.gameType === 'MEMORY_MATCH') {
+      return this.sanitizeMemoryMatch(view as MemoryMatchState);
+    }
     return view;
   }
 
@@ -260,17 +264,28 @@ export class GameEngineService {
     );
   }
 
+  /**
+   * While a race call is open, the partner's tap (and whether it was
+   * correct) stays hidden until the round ends.
+   */
   private sanitizeNumberHunt(
     userId: string,
     state: NumberHuntState,
   ): NumberHuntState {
-    const canSeeTargets =
-      userId === state.pickerId || state.roundDeadline === null;
-    if (!canSeeTargets) state.targetNumbers = [];
-
-    if (state.mode === 'race' && state.callDeadline !== null) {
+    if (state.callDeadline !== null) {
       state.firstTapped = this.stripOtherTaps(userId, state.firstTapped);
     }
+    return state;
+  }
+
+  /** Hidden cards carry symbol -1 so viewers can't read the socket payload. */
+  private sanitizeMemoryMatch(state: MemoryMatchState): MemoryMatchState {
+    const revealing = state.memorizeDeadline !== null;
+    state.cards = state.cards.map((card) =>
+      revealing || card.matchedBy !== null || card.flippedBy !== null
+        ? card
+        : { ...card, symbol: -1 },
+    );
     return state;
   }
 
@@ -304,10 +319,6 @@ export class GameEngineService {
       finished: false,
       results: null,
     };
-  }
-
-  private isRoundOver(state: GameStateBase): boolean {
-    return state.turnUserId === null;
   }
 
   private winnerFromScores(state: GameStateBase): string | null {

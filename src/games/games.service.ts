@@ -31,8 +31,16 @@ export class GamesService {
     {
       id: 'NUMBER_HUNT',
       name: 'Number Hunt',
-      description: 'Spot the numbers. Beat the clock. Outsmart your partner.',
+      description: 'Race to tap the called number before your partner does.',
       category: 'Competitive',
+      minPlayers: 2,
+      maxPlayers: 2,
+    },
+    {
+      id: 'MEMORY_MATCH',
+      name: 'Memory Match',
+      description: 'Memorize the board, then flip the pairs faster than your partner.',
+      category: 'Brain',
       minPlayers: 2,
       maxPlayers: 2,
     },

@@ -5,9 +5,14 @@ const GAME_ICONS: Record<string, { icon: string; color: string; bg: string }> = 
   TIC_TAC_TOE: { icon: 'grid', color: '#10B981', bg: '#E8F8EF' },
   SPEED_BATTLE: { icon: 'lightning-bolt', color: '#F59E0B', bg: '#FEF3C7' },
   NUMBER_HUNT: { icon: 'hexagon', color: '#8B5CF6', bg: '#EDE9FE' },
+  MEMORY_MATCH: { icon: 'cards-variant', color: '#0EA5E9', bg: '#E0F2FE' },
 };
 
 const DEFAULT_GAME_ICON = { icon: 'gamepad-variant', color: '#946BFF', bg: '#EFEAFF' };
+
+function earnedXp(score: number | undefined | null): number {
+  return Math.max(0, score ?? 0);
+}
 
 @Injectable()
 export class StatsService {
@@ -52,7 +57,7 @@ export class StatsService {
       const userPlayer = room.players.find((p) => p.userId === userId)!;
       const partnerPlayer = room.players.find((p) => p.userId !== userId)!;
 
-      xp += userPlayer.score;
+      xp += earnedXp(userPlayer.score);
 
       if (userPlayer.score > partnerPlayer.score) wins++;
       else if (userPlayer.score < partnerPlayer.score) losses++;
@@ -146,7 +151,7 @@ export class StatsService {
       grouped[dayKey].push({
         id: room.id,
         title,
-        xp: `+${userPlayer?.score ?? 0} XP`,
+        xp: `+${earnedXp(userPlayer?.score)} XP`,
         time: timeStr,
         icon,
         color,
@@ -462,7 +467,7 @@ export class StatsService {
     for (const room of [...rooms].reverse()) {
       const player = room.players.find((p: any) => p.userId === userId);
       if (player) {
-        cumulativeXp += player.score;
+        cumulativeXp += earnedXp(player.score);
         if (cumulativeXp >= targetXp) {
           return room.finishedAt?.toISOString() ?? null;
         }
