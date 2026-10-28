@@ -2,6 +2,7 @@ import { GameAction, GameStateBase, MultiplayerGame } from './game.types';
 import { TicTacToeEngine } from './tic-tac-toe/tic-tac-toe.engine';
 import { SpeedBattleEngine } from './speed-battle/speed-battle.engine';
 import { NumberHuntEngine } from './number-hunt/number-hunt.engine';
+import { MemoryMatchEngine } from './memory-match/memory-match.engine';
 
 // Adding a game = adding one entry here. Nothing else changes.
 export const GAME_ENGINES: Record<
@@ -17,6 +18,10 @@ export const GAME_ENGINES: Record<
     GameAction
   >,
   NUMBER_HUNT: new NumberHuntEngine() as unknown as MultiplayerGame<
+    GameStateBase,
+    GameAction
+  >,
+  MEMORY_MATCH: new MemoryMatchEngine() as unknown as MultiplayerGame<
     GameStateBase,
     GameAction
   >,

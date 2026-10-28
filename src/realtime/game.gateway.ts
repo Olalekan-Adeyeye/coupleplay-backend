@@ -14,6 +14,8 @@ import { CouplesService } from '../couples/couples.service';
 import { GameEngineService, ActionOutcome } from '../games/game-engine.service';
 import { GameStateBase } from '../games/game.types';
 import { resolveAllowedOrigins } from '../common/config/origins';
+import { RateLimiter } from '../common/rate-limiter';
+import { PLAYER_REACTIONS } from '../common/constants';
 
 @WebSocketGateway({
   cors: { origin: resolveAllowedOrigins(process.env), credentials: true },
@@ -25,8 +27,13 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   private userSockets = new Map<string, Set<string>>();
   private destroyTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private speedTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private huntTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private roundTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  private actionLimiter = new RateLimiter(15, 10);
+  private timeoutLimiter = new RateLimiter(2, 0.5);
+  private reactionLimiter = new RateLimiter(5, 2);
+  private readyLimiter = new RateLimiter(2, 0.5);
+  private createLimiter = new RateLimiter(5, 0.25);
 
   private readonly disconnectGraceMs = 15_000;
 
@@ -51,6 +58,10 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
 
     const rooms = Array.from(client.rooms).filter((roomId) => roomId !== client.id);
+
+    for (const limiter of [this.actionLimiter, this.timeoutLimiter, this.reactionLimiter, this.readyLimiter, this.createLimiter]) {
+      limiter.drop(client.id);
+    }
 
     for (const roomId of rooms) {
       if (userId) {
@@ -117,6 +128,11 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const userId = this.requireUserId(client);
     if (!userId) return;
 
+    if (!this.createLimiter.tryTake(client.id)) {
+      client.emit('game:reject', { reason: 'Too many requests' });
+      return;
+    }
+
     try {
       const room = await this.roomsService.createRoom(
         data.coupleId,
@@ -139,8 +155,9 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const userId = this.requireUserId(client);
     if (!userId) return;
 
+    let reconnected: boolean;
     try {
-      await this.roomsService.joinRoom(data.roomId, userId);
+      ({ reconnected } = await this.roomsService.joinRoom(data.roomId, userId));
     } catch (err) {
       client.emit('game:reject', { reason: (err as Error).message });
       return;
@@ -150,14 +167,23 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     await this.roomsService.setConnected(data.roomId, userId, true);
 
-    this.server.to(data.roomId).emit('room:player_joined', {
-      roomId: data.roomId,
-      userId,
-    });
     this.server.to(data.roomId).emit('player:presence', {
       socketId: client.id,
       userId,
       connected: true,
+    });
+
+    if (reconnected) {
+      const state = await this.engineService.getCurrentState(data.roomId);
+      if (state) {
+        client.emit('game:state', this.engineService.sanitizeForViewer(userId, state));
+      }
+      return;
+    }
+
+    this.server.to(data.roomId).emit('room:player_joined', {
+      roomId: data.roomId,
+      userId,
     });
 
     const ready = await this.hasBothPlayers(data.roomId);
@@ -197,6 +223,11 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const userId = this.requireUserId(client);
     if (!userId) return;
 
+    if (!this.readyLimiter.tryTake(client.id)) {
+      client.emit('game:reject', { reason: 'Too many requests' });
+      return;
+    }
+
     try {
       await this.roomsService.assertRoomMembership(data.roomId, userId);
       await this.roomsService.playerReady(data.roomId, userId);
@@ -218,12 +249,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       const state = await this.engineService.startGame(data.roomId);
       await this.broadcastGameState(data.roomId, state);
       this.server.to(data.roomId).emit('game:start', { roomId: data.roomId });
-      if (state.gameType === 'SPEED_BATTLE') {
-        this.scheduleTimersFor(data.roomId, state);
-      }
-      if (state.gameType === 'NUMBER_HUNT') {
-        this.scheduleTimersFor(data.roomId, state);
-      }
+      this.scheduleTimersFor(data.roomId, state);
     }
   }
 
@@ -237,6 +263,11 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   ) {
     const userId = this.requireUserId(client);
     if (!userId) return;
+
+    if (!this.actionLimiter.tryTake(client.id)) {
+      client.emit('game:reject', { reason: 'Too many requests' });
+      return;
+    }
 
     try {
       await this.roomsService.assertRoomMembership(data.roomId, userId);
@@ -266,6 +297,8 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   ) {
     const userId = this.requireUserId(client);
     if (!userId) return;
+
+    if (!this.timeoutLimiter.tryTake(client.id)) return;
 
     try {
       await this.roomsService.assertRoomMembership(data.roomId, userId);
@@ -299,14 +332,28 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   /* ── Reactions ───────────────────────────────────────────────── */
 
   @SubscribeMessage('player:reaction')
-  handleReaction(
+  async handleReaction(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { roomId: string; reaction: string },
+    @MessageBody() data: { roomId?: string; reaction?: string },
   ) {
     const userId = client.data.userId as string | undefined;
     if (!userId) return;
+    if (typeof data?.roomId !== 'string' || typeof data.reaction !== 'string') {
+      return;
+    }
+    if (!(PLAYER_REACTIONS as readonly string[]).includes(data.reaction)) return;
+    if (!this.reactionLimiter.tryTake(client.id)) return;
 
-    client.to(data.roomId).emit('player:reaction', { userId, reaction: data.reaction });
+    try {
+      await this.roomsService.assertRoomMembership(data.roomId, userId);
+    } catch {
+      return;
+    }
+
+    this.server.to(data.roomId).emit('player:reaction', {
+      userId,
+      reaction: data.reaction,
+    });
   }
 
   /* ── Couple link events (server-resolved, partner-scoped) ────── */
@@ -393,29 +440,33 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return deadline ?? null;
     }
     if (state.gameType === 'NUMBER_HUNT') {
-      const ns = state as unknown as { mode: string | null; roundDeadline: number | null; callDeadline: number | null };
-      return ns.mode === 'race' ? ns.callDeadline : ns.roundDeadline;
+      const ns = state as unknown as { callDeadline: number | null };
+      return ns.callDeadline;
+    }
+    if (state.gameType === 'MEMORY_MATCH') {
+      const ms = state as unknown as {
+        memorizeDeadline: number | null;
+        revealDeadline: number | null;
+        turnDeadline: number | null;
+      };
+      return ms.memorizeDeadline ?? ms.revealDeadline ?? ms.turnDeadline;
     }
     return null;
   }
 
   private scheduleTimersFor(roomId: string, state: GameStateBase) {
-    this.clearSpeedBattleTimer(roomId);
-    this.clearNumberHuntTimer(roomId);
+    this.clearRoundTimer(roomId);
 
     const deadline = this.currentDeadline(state);
     if (deadline === null) return;
 
-    const isSpeed = state.gameType === 'SPEED_BATTLE';
-    const timers = isSpeed ? this.speedTimers : this.huntTimers;
     const delay = Math.max(0, deadline - Date.now());
-
-    const timer = setTimeout(async () => {
-      timers.delete(roomId);
-      await this.runTimeout(roomId);
+    const timer = setTimeout(() => {
+      this.roundTimers.delete(roomId);
+      this.runTimeout(roomId).catch(() => {});
     }, delay);
 
-    timers.set(roomId, timer);
+    this.roundTimers.set(roomId, timer);
   }
 
   private async runTimeout(roomId: string) {
@@ -424,19 +475,11 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     await this.broadcastOutcome(roomId, outcome);
   }
 
-  private clearSpeedBattleTimer(roomId: string) {
-    const timer = this.speedTimers.get(roomId);
+  private clearRoundTimer(roomId: string) {
+    const timer = this.roundTimers.get(roomId);
     if (timer) {
       clearTimeout(timer);
-      this.speedTimers.delete(roomId);
-    }
-  }
-
-  private clearNumberHuntTimer(roomId: string) {
-    const timer = this.huntTimers.get(roomId);
-    if (timer) {
-      clearTimeout(timer);
-      this.huntTimers.delete(roomId);
+      this.roundTimers.delete(roomId);
     }
   }
 
@@ -468,8 +511,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   private async destroyRoom(roomId: string) {
     this.cancelDestruction(roomId);
-    this.clearSpeedBattleTimer(roomId);
-    this.clearNumberHuntTimer(roomId);
+    this.clearRoundTimer(roomId);
     this.engineService.dropLive(roomId);
 
     try {
