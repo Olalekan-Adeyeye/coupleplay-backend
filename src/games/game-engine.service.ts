@@ -7,12 +7,16 @@ import {
   GameStateBase,
   MultiplayerGame,
 } from './game.types';
+import { SpeedBattleState } from './speed-battle/speed-battle.engine';
+import { NumberHuntState } from './number-hunt/number-hunt.engine';
 
 export interface ActionOutcome {
   state: GameStateBase;
+  endedState: GameStateBase | null;
   changed: boolean;
   roundEnded: boolean;
   roundWinnerId: string | null;
+  endedRoundNumber: number | null;
   finished: boolean;
   results: GameResult | null;
 }
@@ -21,11 +25,23 @@ export interface ActionOutcome {
 export class GameEngineService {
   private readonly logger = new Logger(GameEngineService.name);
 
-  // Hot in-memory mirror of authoritative state, lazily hydrated from
-  // GameRound.data so reconnections and restarts resync cleanly.
   private live = new Map<string, GameStateBase>();
 
+  private locks = new Map<string, Promise<unknown>>();
+
   constructor(private prisma: PrismaService) {}
+
+  private withRoomLock<T>(roomId: string, fn: () => Promise<T>): Promise<T> {
+    const prior = (this.locks.get(roomId) ?? Promise.resolve()).catch(() => {});
+    const run = prior.then(fn);
+    this.locks.set(roomId, run);
+    const release = () => {
+      if (this.locks.get(roomId) === run) this.locks.delete(roomId);
+    };
+    run.then(release, release);
+
+    return run;
+  }
 
   private engineFor(
     gameType: string,
@@ -42,12 +58,22 @@ export class GameEngineService {
   }
 
   async startGame(roomId: string): Promise<GameStateBase> {
+    return this.withRoomLock(roomId, () => this.startGameLocked(roomId));
+  }
+
+  private async startGameLocked(roomId: string): Promise<GameStateBase> {
     const room = await this.prisma.gameRoom.findUnique({
       where: { id: roomId },
       include: { players: true },
     });
     if (!room) throw new Error('Room not found');
     if (room.players.length < 2) throw new Error('Need both players');
+
+    if (room.status !== 'WAITING') {
+      const existing = await this.getCurrentState(roomId);
+      if (existing) return existing;
+      throw new Error(`Room is ${room.status}, not startable`);
+    }
 
     const engine = this.engineFor(room.gameType);
     const state = engine.createGame(roomId, room.players as any, room.totalRounds);
@@ -93,6 +119,14 @@ export class GameEngineService {
     playerId: string,
     action: GameAction,
   ): Promise<ActionOutcome> {
+    return this.withRoomLock(roomId, () => this.applyAction(roomId, playerId, action));
+  }
+
+  private async applyAction(
+    roomId: string,
+    playerId: string,
+    action: GameAction,
+  ): Promise<ActionOutcome> {
     const state = await this.getCurrentState(roomId);
     if (!state || state.status !== 'active') {
       return this.idle(state);
@@ -100,72 +134,37 @@ export class GameEngineService {
 
     const engine = await this.engineForRoom(roomId);
     const next = engine.handleAction(state, playerId, action);
+    if (next === state) return this.idle(state);
 
-    // Rejected (not your turn / illegal move) → echo current state only.
-    if (next === state) {
-      return this.idle(state);
-    }
-
-    const roundEnded = next.roundWinnerId !== null || this.isRoundOver(next);
-    const finished = roundEnded && engine.isFinished(next);
-
-    if (finished) {
-      next.status = 'finished';
-      next.winnerId =
-        next.roundWinnerId ?? this.winnerFromScores(next);
-    }
-
-    const results = finished ? engine.getResults(next) : null;
-
-    if (roundEnded) {
-      await this.persistRoundEnd(roomId, next, next.roundNumber, finished);
-    } else {
-      await this.persistRound(roomId, next);
-    }
-
-    // The state to broadcast: the fresh next-round state when the match
-    // continues, otherwise the just-played state.
-    let broadcastState = next;
-
-    if (finished) {
-      await this.prisma.gameRoom.update({
-        where: { id: roomId },
-        data: { status: 'FINISHED', finishedAt: new Date() },
-      });
-      this.live.delete(roomId);
-    } else if (roundEnded) {
-      broadcastState = await this.startNextRound(roomId, next);
-    } else {
-      this.live.set(roomId, next);
-    }
-
-    return {
-      state: broadcastState,
-      changed: true,
-      roundEnded,
-      roundWinnerId: next.roundWinnerId,
-      finished,
-      results,
-    };
+    return this.transit(roomId, engine, next);
   }
 
   async handleTimeout(roomId: string): Promise<ActionOutcome> {
+    return this.withRoomLock(roomId, () => this.applyTimeout(roomId));
+  }
+
+  private async applyTimeout(roomId: string): Promise<ActionOutcome> {
     const state = await this.getCurrentState(roomId);
     if (!state || state.status !== 'active') {
       return this.idle(state);
     }
 
     const engine = await this.engineForRoom(roomId);
+    if (typeof engine.tickExpired !== 'function') return this.idle(state);
 
-    // Only speed-battle has tickExpired
-    if (typeof (engine as any).tickExpired !== 'function') {
-      return this.idle(state);
-    }
-
-    const next = (engine as any).tickExpired(state) as GameStateBase;
+    const next = engine.tickExpired(state);
     if (next === state) return this.idle(state);
 
+    return this.transit(roomId, engine, next);
+  }
+
+  private async transit(
+    roomId: string,
+    engine: MultiplayerGame<GameStateBase, GameAction>,
+    next: GameStateBase,
+  ): Promise<ActionOutcome> {
     const roundEnded = next.roundWinnerId !== null || this.isRoundOver(next);
+    const endedRoundNumber = next.roundNumber;
     const finished = roundEnded && engine.isFinished(next);
 
     if (finished) {
@@ -188,6 +187,7 @@ export class GameEngineService {
         where: { id: roomId },
         data: { status: 'FINISHED', finishedAt: new Date() },
       });
+      await this.persistScores(roomId, next);
       this.live.delete(roomId);
     } else if (roundEnded) {
       broadcastState = await this.startNextRound(roomId, next);
@@ -195,27 +195,112 @@ export class GameEngineService {
       this.live.set(roomId, next);
     }
 
+    const endedState = roundEnded ? next : null;
+
     return {
       state: broadcastState,
+      endedState,
       changed: true,
       roundEnded,
       roundWinnerId: next.roundWinnerId,
+      endedRoundNumber,
       finished,
       results,
     };
   }
 
-  /** Drop the in-memory state for a room being destroyed. */
+  /**
+   * The viewer-facing projection of the authoritative state:
+   * unanswered question keys and unplayed hunt targets are removed.
+   */
+  sanitizeForViewer(userId: string, state: GameStateBase): GameStateBase {
+    const view: GameStateBase = JSON.parse(JSON.stringify(state));
+
+    if (view.gameType === 'SPEED_BATTLE') {
+      return this.sanitizeSpeedBattle(userId, view as SpeedBattleState);
+    }
+    if (view.gameType === 'NUMBER_HUNT') {
+      return this.sanitizeNumberHunt(userId, view as NumberHuntState);
+    }
+    return view;
+  }
+
+  private sanitizeSpeedBattle(
+    userId: string,
+    state: SpeedBattleState,
+  ): SpeedBattleState {
+    const roundOver = state.questionDeadline === null;
+    const revealedUpTo = roundOver
+      ? state.currentQuestionIndex
+      : state.currentQuestionIndex - 1;
+
+    state.questions = state.questions.map((question, index) => {
+      if (index <= revealedUpTo) return question;
+      const { correctIndex, ...public_fields } = question;
+      return public_fields as typeof question;
+    });
+
+    if (!roundOver) {
+      state.answers = this.stripOtherAnswers(userId, state.answers);
+    }
+    return state;
+  }
+
+  private stripOtherAnswers(
+    userId: string,
+    answers: Record<string, { optionIndex: number; correct: boolean; answeredAt: number } | null>,
+  ): Record<string, { optionIndex: number; correct: boolean; answeredAt: number } | null> {
+    return Object.fromEntries(
+      Object.entries(answers).map(([playerId, answer]) => [
+        playerId,
+        playerId === userId || answer === null
+          ? answer
+          : { answeredAt: answer.answeredAt, optionIndex: -1, correct: false },
+      ]),
+    );
+  }
+
+  private sanitizeNumberHunt(
+    userId: string,
+    state: NumberHuntState,
+  ): NumberHuntState {
+    const canSeeTargets =
+      userId === state.pickerId || state.roundDeadline === null;
+    if (!canSeeTargets) state.targetNumbers = [];
+
+    if (state.mode === 'race' && state.callDeadline !== null) {
+      state.firstTapped = this.stripOtherTaps(userId, state.firstTapped);
+    }
+    return state;
+  }
+
+  private stripOtherTaps(
+    userId: string,
+    firstTapped: Record<string, { number: number; tappedAt: number } | null>,
+  ): Record<string, { number: number; tappedAt: number } | null> {
+    return Object.fromEntries(
+      Object.entries(firstTapped).map(([playerId, tap]) => [
+        playerId,
+        playerId === userId || tap === null
+          ? tap
+          : { number: -1, tappedAt: tap.tappedAt },
+      ]),
+    );
+  }
+
   dropLive(roomId: string): void {
     this.live.delete(roomId);
+    this.locks.delete(roomId);
   }
 
   private idle(state: GameStateBase | null): ActionOutcome {
     return {
       state: state as GameStateBase,
+      endedState: null,
       changed: false,
       roundEnded: false,
       roundWinnerId: null,
+      endedRoundNumber: null,
       finished: false,
       results: null,
     };
@@ -262,6 +347,23 @@ export class GameEngineService {
       });
     } catch (err) {
       this.logger.error(`Failed to persist round end for room ${roomId}: ${err}`);
+    }
+  }
+
+  private async persistScores(roomId: string, state: GameStateBase) {
+    try {
+      const scoreEntries = Object.entries(state.scores);
+      if (scoreEntries.length === 0) return;
+      await Promise.all(
+        scoreEntries.map(([userId, score]) =>
+          this.prisma.gamePlayer.update({
+            where: { roomId_userId: { roomId, userId } },
+            data: { score },
+          }),
+        ),
+      );
+    } catch (err) {
+      this.logger.error(`Failed to persist scores for room ${roomId}: ${err}`);
     }
   }
 

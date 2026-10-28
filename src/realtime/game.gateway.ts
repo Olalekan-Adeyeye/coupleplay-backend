@@ -10,10 +10,13 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { Server, Socket } from 'socket.io';
 import { RoomsService } from '../rooms/rooms.service';
-import { GameEngineService } from '../games/game-engine.service';
+import { CouplesService } from '../couples/couples.service';
+import { GameEngineService, ActionOutcome } from '../games/game-engine.service';
+import { GameStateBase } from '../games/game.types';
+import { resolveAllowedOrigins } from '../common/config/origins';
 
 @WebSocketGateway({
-  cors: { origin: true, credentials: true },
+  cors: { origin: resolveAllowedOrigins(process.env), credentials: true },
   namespace: '/game',
 })
 export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
@@ -21,40 +24,40 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   server!: Server;
 
   private userSockets = new Map<string, Set<string>>();
+  private destroyTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private speedTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private huntTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  private readonly disconnectGraceMs = 15_000;
 
   constructor(
     private roomsService: RoomsService,
+    private couplesService: CouplesService,
     private engineService: GameEngineService,
     private jwtService: JwtService,
   ) {}
 
   /* ── Connection lifecycle ────────────────────────────────────── */
 
-  handleConnection(client: Socket) {
-    console.log(`Client connected: ${client.id}`);
-  }
+  handleConnection(client: Socket) {}
 
   handleDisconnect(client: Socket) {
-    console.log(`Client disconnected: ${client.id}`);
-
     const userId = client.data.userId as string | undefined;
+
     if (userId) {
       const sockets = this.userSockets.get(userId);
       sockets?.delete(client.id);
-      if (sockets?.size === 0) this.userSockets.delete(userId);
+      if (sockets && sockets.size === 0) this.userSockets.delete(userId);
     }
 
-    const rooms = Array.from(client.rooms);
-    for (const roomId of rooms) {
-      if (roomId === client.id) continue;
+    const rooms = Array.from(client.rooms).filter((roomId) => roomId !== client.id);
 
-      // Mark player disconnected in DB
+    for (const roomId of rooms) {
       if (userId) {
         this.roomsService.setConnected(roomId, userId, false).catch(() => {});
+        const hasOtherSocket = this.userSockets.has(userId);
+        if (!hasOtherSocket) this.scheduleDestruction(roomId);
       }
-
-      // Immediately destroy the room — no grace period
-      this.destroyRoom(roomId, userId);
     }
   }
 
@@ -63,40 +66,44 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @SubscribeMessage('authenticate')
   async handleAuth(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { token?: string; userId?: string },
+    @MessageBody() data: { token?: string },
   ) {
-    let userId: string | undefined;
-
-    if (data.token) {
-      try {
-        const payload = await this.jwtService.verifyAsync(data.token);
-        userId = payload.sub;
-      } catch {
-        client.emit('authenticated', { ok: false, error: 'Invalid token' });
-        return;
-      }
-    } else if (data.userId) {
-      // Dev-only fallback — reject in production
-      if (process.env.NODE_ENV === 'production') {
-        client.emit('authenticated', { ok: false, error: 'userId auth not allowed in production' });
-        return;
-      }
-      userId = data.userId;
-    }
-
-    if (!userId) {
+    const token = data?.token;
+    if (!token) {
       client.emit('authenticated', { ok: false, error: 'No credentials' });
       return;
     }
 
-    client.data.userId = userId;
-
-    if (!this.userSockets.has(userId)) {
-      this.userSockets.set(userId, new Set());
+    let userId: string;
+    try {
+      const payload = await this.jwtService.verifyAsync(token);
+      userId = payload.sub;
+    } catch {
+      client.emit('authenticated', { ok: false, error: 'Invalid token' });
+      return;
     }
-    this.userSockets.get(userId)!.add(client.id);
+
+    if (typeof client.data.userId === 'string' && client.data.userId !== userId) {
+      client.emit('authenticated', { ok: false, error: 'Socket already bound' });
+      return;
+    }
+
+    client.data.userId = userId;
+    client.join(`user:${userId}`);
+
+    const sockets = this.userSockets.get(userId) ?? new Set<string>();
+    sockets.add(client.id);
+    this.userSockets.set(userId, sockets);
 
     client.emit('authenticated', { ok: true, userId });
+  }
+
+  private requireUserId(client: Socket): string | null {
+    const userId = client.data.userId as string | undefined;
+    if (!userId) {
+      client.emit('game:reject', { reason: 'Not authenticated' });
+    }
+    return userId ?? null;
   }
 
   /* ── Room management ─────────────────────────────────────────── */
@@ -107,20 +114,21 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody()
     data: { coupleId: string; gameType: string; totalRounds?: number },
   ) {
-    const userId = client.data.userId;
+    const userId = this.requireUserId(client);
     if (!userId) return;
 
-    const room = await this.roomsService.createRoom(
-      data.coupleId,
-      data.gameType as any,
-      data.totalRounds ?? 5,
-    );
-    client.join(room.id);
-    client.emit('room:created', room);
-    this.server.to(room.id).emit('room:player_joined', {
-      roomId: room.id,
-      userId,
-    });
+    try {
+      const room = await this.roomsService.createRoom(
+        data.coupleId,
+        data.gameType,
+        data.totalRounds ?? 5,
+        userId,
+      );
+      client.join(room.id);
+      client.emit('room:created', room);
+    } catch (err) {
+      client.emit('game:reject', { reason: (err as Error).message });
+    }
   }
 
   @SubscribeMessage('room:join')
@@ -128,13 +136,18 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { roomId: string },
   ) {
-    const userId = client.data.userId;
+    const userId = this.requireUserId(client);
     if (!userId) return;
 
-    await this.roomsService.joinRoom(data.roomId, userId);
+    try {
+      await this.roomsService.joinRoom(data.roomId, userId);
+    } catch (err) {
+      client.emit('game:reject', { reason: (err as Error).message });
+      return;
+    }
+    this.cancelDestruction(data.roomId);
     client.join(data.roomId);
 
-    // Restore connected flag
     await this.roomsService.setConnected(data.roomId, userId, true);
 
     this.server.to(data.roomId).emit('room:player_joined', {
@@ -147,8 +160,8 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       connected: true,
     });
 
-    const sockets = await this.server.in(data.roomId).fetchSockets();
-    if (sockets.length === 2) {
+    const ready = await this.hasBothPlayers(data.roomId);
+    if (ready) {
       this.server.to(data.roomId).emit('room:ready', {
         roomId: data.roomId,
         message: 'Both players joined',
@@ -161,19 +174,17 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { roomId: string },
   ) {
-    const userId = client.data.userId;
-    client.leave(data.roomId);
+    const userId = this.requireUserId(client);
+    if (!userId) return;
 
+    client.leave(data.roomId);
     this.server.to(data.roomId).emit('room:player_left', {
       roomId: data.roomId,
       userId,
     });
 
-    // Mark disconnected + destroy immediately
-    if (userId) {
-      this.roomsService.setConnected(data.roomId, userId, false).catch(() => {});
-    }
-    this.destroyRoom(data.roomId, userId);
+    this.roomsService.setConnected(data.roomId, userId, false).catch(() => {});
+    this.destroyRoom(data.roomId);
   }
 
   /* ── Ready + Game start ──────────────────────────────────────── */
@@ -183,28 +194,35 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { roomId: string },
   ) {
-    const userId = client.data.userId;
+    const userId = this.requireUserId(client);
     if (!userId) return;
 
-    await this.roomsService.playerReady(data.roomId, userId);
+    try {
+      await this.roomsService.assertRoomMembership(data.roomId, userId);
+      await this.roomsService.playerReady(data.roomId, userId);
+    } catch (err) {
+      client.emit('game:reject', { reason: (err as Error).message });
+      return;
+    }
+
     this.server.to(data.roomId).emit('player:status', {
       userId,
       ready: true,
     });
 
-    // Check if both players ready → start game
     const room = await this.roomsService.getRoom(data.roomId, userId);
     const allReady =
       room.players.length === 2 && room.players.every((p) => p.ready);
 
     if (allReady && room.status === 'WAITING') {
       const state = await this.engineService.startGame(data.roomId);
+      await this.broadcastGameState(data.roomId, state);
       this.server.to(data.roomId).emit('game:start', { roomId: data.roomId });
-      this.server.to(data.roomId).emit('game:state', state);
-
-      // Schedule speed-battle timer if applicable
-      if (state.gameType === 'SPEED_BATTLE' && (state as any).questionDeadline) {
-        this.scheduleSpeedBattleTimeout(data.roomId, (state as any).questionDeadline);
+      if (state.gameType === 'SPEED_BATTLE') {
+        this.scheduleTimersFor(data.roomId, state);
+      }
+      if (state.gameType === 'NUMBER_HUNT') {
+        this.scheduleTimersFor(data.roomId, state);
       }
     }
   }
@@ -217,49 +235,45 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody()
     data: { roomId: string; action: string; payload?: any },
   ) {
-    const userId = client.data.userId;
-    if (!userId) {
-      client.emit('game:reject', { reason: 'Not authenticated' });
+    const userId = this.requireUserId(client);
+    if (!userId) return;
+
+    try {
+      await this.roomsService.assertRoomMembership(data.roomId, userId);
+    } catch {
+      client.emit('game:reject', { reason: 'Not in this room' });
       return;
     }
 
-    const outcome = await this.engineService.handleAction(
-      data.roomId,
-      userId,
-      { action: data.action, payload: data.payload },
-    );
+    const outcome = await this.engineService
+      .handleAction(data.roomId, userId, { action: data.action, payload: data.payload })
+      .catch(() => null);
 
-    if (!outcome.changed) {
+    if (!outcome?.changed) {
       client.emit('game:reject', { reason: 'Move rejected' });
       return;
     }
 
-    // Broadcast updated state to all
-    this.server.to(data.roomId).emit('game:state', outcome.state);
+    await this.broadcastOutcome(data.roomId, outcome);
+  }
 
-    if (outcome.roundEnded) {
-      this.server.to(data.roomId).emit('game:round_end', {
-        roomId: data.roomId,
-        roundNumber: outcome.state.roundNumber - (outcome.finished ? 0 : 1),
-        winnerId: outcome.roundWinnerId,
-      });
+  // Client-side safety net if a server timer was lost (e.g. after a
+  // restart) — the engine validates that the deadline really passed.
+  @SubscribeMessage('game:timeout')
+  async handleClientTimeout(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { roomId: string },
+  ) {
+    const userId = this.requireUserId(client);
+    if (!userId) return;
+
+    try {
+      await this.roomsService.assertRoomMembership(data.roomId, userId);
+    } catch {
+      return;
     }
 
-    if (outcome.finished) {
-      this.server.to(data.roomId).emit('game:finished', {
-        roomId: data.roomId,
-        results: outcome.results,
-      });
-    }
-
-    // Schedule next speed-battle timer if applicable
-    if (
-      !outcome.finished &&
-      outcome.state.gameType === 'SPEED_BATTLE' &&
-      (outcome.state as any).questionDeadline
-    ) {
-      this.scheduleSpeedBattleTimeout(data.roomId, (outcome.state as any).questionDeadline);
-    }
+    await this.runTimeout(data.roomId);
   }
 
   @SubscribeMessage('game:sync')
@@ -267,48 +281,19 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { roomId: string },
   ) {
-    const state = await this.engineService.getCurrentState(data.roomId);
-    if (state) {
-      client.emit('game:state', state);
-    }
-  }
-
-  @SubscribeMessage('game:timeout')
-  async handleTimeout(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() data: { roomId: string },
-  ) {
-    const userId = client.data.userId;
+    const userId = this.requireUserId(client);
     if (!userId) return;
 
-    const outcome = await this.engineService.handleTimeout(data.roomId);
-    if (!outcome.changed) return;
+    const state = await this.engineService.getCurrentState(data.roomId);
+    if (!state) return;
 
-    this.server.to(data.roomId).emit('game:state', outcome.state);
-
-    if (outcome.roundEnded) {
-      this.server.to(data.roomId).emit('game:round_end', {
-        roomId: data.roomId,
-        roundNumber: outcome.state.roundNumber - (outcome.finished ? 0 : 1),
-        winnerId: outcome.roundWinnerId,
-      });
+    try {
+      await this.roomsService.assertRoomMembership(data.roomId, userId);
+    } catch {
+      return;
     }
 
-    if (outcome.finished) {
-      this.server.to(data.roomId).emit('game:finished', {
-        roomId: data.roomId,
-        results: outcome.results,
-      });
-    }
-
-    // Schedule next speed-battle timer
-    if (
-      !outcome.finished &&
-      outcome.state.gameType === 'SPEED_BATTLE' &&
-      (outcome.state as any).questionDeadline
-    ) {
-      this.scheduleSpeedBattleTimeout(data.roomId, (outcome.state as any).questionDeadline);
-    }
+    client.emit('game:state', this.engineService.sanitizeForViewer(userId, state));
   }
 
   /* ── Reactions ───────────────────────────────────────────────── */
@@ -318,70 +303,182 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { roomId: string; reaction: string },
   ) {
-    client
-      .to(data.roomId)
-      .emit('player:reaction', {
-        userId: client.data.userId,
-        reaction: data.reaction,
-      });
+    const userId = client.data.userId as string | undefined;
+    if (!userId) return;
+
+    client.to(data.roomId).emit('player:reaction', { userId, reaction: data.reaction });
   }
 
-  /* ── Couple unlink (realtime notify partner) ─────────────────── */
+  /* ── Couple link events (server-resolved, partner-scoped) ────── */
 
   @SubscribeMessage('couples:unlink')
   async handleUnlink(@ConnectedSocket() client: Socket) {
-    const userId = client.data.userId;
+    const userId = this.requireUserId(client);
     if (!userId) return;
 
-    // Broadcast to all authenticated sockets; frontend filters by couple
-    this.server.emit('couple:unlinked', { byUserId: userId });
-  }
+    const couple = await this.couplesService.getMyCouple(userId);
+    if (!couple) return;
 
-  /* ── Couple linked (realtime notify partner) ─────────────────── */
+    const partner = couple.userAId === userId ? couple.userBId : couple.userAId;
+    if (partner) {
+      this.server.to(`user:${partner}`).emit('couple:unlinked', {
+        byUserId: userId,
+        coupleId: couple.id,
+      });
+    }
+  }
 
   @SubscribeMessage('couples:joined')
   async handleJoined(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { couple: any },
   ) {
-    // Broadcast the new couple state to all sockets — partner's app updates instantly
-    this.server.emit('couple:linked', data.couple);
+    const userId = this.requireUserId(client);
+    if (!userId) return;
+
+    const couple = await this.couplesService.getMyCouple(userId);
+    if (!couple) return;
+
+    const partner = couple.userAId === userId ? couple.userBId : couple.userAId;
+    if (partner) {
+      this.server.to(`user:${partner}`).emit('couple:linked', { coupleId: couple.id });
+    }
   }
 
-  /* ── Instant room destruction ─────────────────────────────────── */
+  /* ── Outcome broadcast ───────────────────────────────────────── */
 
-  private async destroyRoom(roomId: string, userId?: string) {
-    // Mark room finished
+  private playerIds(state: GameStateBase): string[] {
+    return Object.keys(state.scores);
+  }
+
+  private async broadcastGameState(roomId: string, state: GameStateBase) {
+    for (const userId of this.playerIds(state)) {
+      this.server.to(`user:${userId}`).emit('game:state', this.engineService.sanitizeForViewer(userId, state));
+    }
+  }
+
+  private async broadcastOutcome(roomId: string, outcome: ActionOutcome) {
+    await this.broadcastGameState(roomId, outcome.state);
+
+    if (outcome.roundEnded) {
+      for (const userId of this.playerIds(outcome.state)) {
+        const reveal = outcome.endedState
+          ? this.engineService.sanitizeForViewer(userId, outcome.endedState)
+          : null;
+        this.server.to(`user:${userId}`).emit('game:round_end', {
+          roomId,
+          roundNumber: outcome.endedRoundNumber,
+          winnerId: outcome.roundWinnerId,
+          reveal,
+        });
+      }
+    }
+
+    if (outcome.finished && outcome.results) {
+      this.server.to(roomId).emit('game:finished', {
+        roomId,
+        results: outcome.results,
+      });
+    }
+
+    if (!outcome.finished) {
+      this.scheduleTimersFor(roomId, outcome.state);
+    }
+  }
+
+  /* ── Timers ──────────────────────────────────────────────────── */
+
+  private currentDeadline(state: GameStateBase): number | null {
+    if (state.gameType === 'SPEED_BATTLE') {
+      const deadline = (state as { questionDeadline?: number | null }).questionDeadline;
+      return deadline ?? null;
+    }
+    if (state.gameType === 'NUMBER_HUNT') {
+      const ns = state as unknown as { mode: string | null; roundDeadline: number | null; callDeadline: number | null };
+      return ns.mode === 'race' ? ns.callDeadline : ns.roundDeadline;
+    }
+    return null;
+  }
+
+  private scheduleTimersFor(roomId: string, state: GameStateBase) {
+    this.clearSpeedBattleTimer(roomId);
+    this.clearNumberHuntTimer(roomId);
+
+    const deadline = this.currentDeadline(state);
+    if (deadline === null) return;
+
+    const isSpeed = state.gameType === 'SPEED_BATTLE';
+    const timers = isSpeed ? this.speedTimers : this.huntTimers;
+    const delay = Math.max(0, deadline - Date.now());
+
+    const timer = setTimeout(async () => {
+      timers.delete(roomId);
+      await this.runTimeout(roomId);
+    }, delay);
+
+    timers.set(roomId, timer);
+  }
+
+  private async runTimeout(roomId: string) {
+    const outcome = await this.engineService.handleTimeout(roomId).catch(() => null);
+    if (!outcome?.changed) return;
+    await this.broadcastOutcome(roomId, outcome);
+  }
+
+  private clearSpeedBattleTimer(roomId: string) {
+    const timer = this.speedTimers.get(roomId);
+    if (timer) {
+      clearTimeout(timer);
+      this.speedTimers.delete(roomId);
+    }
+  }
+
+  private clearNumberHuntTimer(roomId: string) {
+    const timer = this.huntTimers.get(roomId);
+    if (timer) {
+      clearTimeout(timer);
+      this.huntTimers.delete(roomId);
+    }
+  }
+
+  /* ── Room destruction with reconnect grace ───────────────────── */
+
+  private scheduleDestruction(roomId: string) {
+    if (this.destroyTimers.has(roomId)) return;
+    const timer = setTimeout(async () => {
+      this.destroyTimers.delete(roomId);
+      const sockets = await this.server.in(roomId).fetchSockets();
+      if (sockets.length === 0) this.destroyRoom(roomId);
+    }, this.disconnectGraceMs);
+    this.destroyTimers.set(roomId, timer);
+  }
+
+  private cancelDestruction(roomId: string) {
+    const timer = this.destroyTimers.get(roomId);
+    if (timer) {
+      clearTimeout(timer);
+      this.destroyTimers.delete(roomId);
+    }
+  }
+
+  private async hasBothPlayers(roomId: string): Promise<boolean> {
+    const sockets = await this.server.in(roomId).fetchSockets();
+    const userIds = new Set(sockets.map((s) => (s.data as { userId?: string }).userId).filter(Boolean));
+    return userIds.size >= 2;
+  }
+
+  private async destroyRoom(roomId: string) {
+    this.cancelDestruction(roomId);
+    this.clearSpeedBattleTimer(roomId);
+    this.clearNumberHuntTimer(roomId);
+    this.engineService.dropLive(roomId);
+
     try {
       await this.roomsService.setRoomStatus(roomId, 'FINISHED');
     } catch {}
-
-    // Drop engine state
-    this.engineService.dropLive(roomId);
 
     this.server.to(roomId).emit('game:abandoned', {
       roomId,
       reason: 'Partner disconnected',
     });
-  }
-
-  /* ── Speed Battle timer ──────────────────────────────────────── */
-
-  private speedTimers = new Map<string, ReturnType<typeof setTimeout>>();
-
-  private scheduleSpeedBattleTimeout(roomId: string, deadline: number) {
-    // Clear existing
-    const existing = this.speedTimers.get(roomId);
-    if (existing) clearTimeout(existing);
-
-    const delay = Math.max(0, deadline - Date.now());
-    const timer = setTimeout(() => {
-      this.handleTimeout(
-        { data: {} } as any,  // dummy client — timeout is server-initiated
-        { roomId },
-      );
-    }, Math.min(delay, 16_000));
-
-    this.speedTimers.set(roomId, timer);
   }
 }

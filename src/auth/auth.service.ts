@@ -2,12 +2,27 @@ import {
   Injectable,
   UnauthorizedException,
   ConflictException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '../database/prisma.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
+
+const BCRYPT_ROUNDS = 12;
+
+// Compare target for unknown emails so login timing doesn't leak existence.
+const DUMMY_HASH = '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy';
+
+const PROFILE_SELECT = {
+  id: true,
+  email: true,
+  username: true,
+  name: true,
+  avatar: true,
+} as const;
 
 @Injectable()
 export class AuthService {
@@ -17,66 +32,49 @@ export class AuthService {
   ) {}
 
   async register(dto: RegisterDto) {
-    const existing = await this.prisma.user.findFirst({
-      where: {
-        OR: [{ email: dto.email }, { username: dto.username }],
-      },
-    });
+    const hashedPassword = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
 
-    if (existing) {
-      throw new ConflictException('Email or username already taken');
+    try {
+      const user = await this.prisma.user.create({
+        data: {
+          email: dto.email.toLowerCase(),
+          username: dto.username,
+          name: dto.name,
+          password: hashedPassword,
+          ...(dto.avatar && { avatar: dto.avatar }),
+        },
+        select: { ...PROFILE_SELECT },
+      });
+
+      return {
+        user,
+        token: this.jwtService.sign({ sub: user.id }),
+      };
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        throw new ConflictException('Email or username already taken');
+      }
+      throw err;
     }
-
-    const hashedPassword = await bcrypt.hash(dto.password, 10);
-
-    const user = await this.prisma.user.create({
-      data: {
-        email: dto.email,
-        username: dto.username,
-        name: dto.name,
-        password: hashedPassword,
-        ...(dto.avatar && { avatar: dto.avatar }),
-      },
-    });
-
-    const token = this.jwtService.sign({ sub: user.id });
-
-    return {
-      user: {
-        id: user.id,
-        email: user.email,
-        username: user.username,
-        name: user.name,
-        avatar: user.avatar,
-      },
-      token,
-    };
   }
 
   async login(dto: LoginDto) {
+    const email = dto.email.toLowerCase();
     const user = await this.prisma.user.findUnique({
-      where: { email: dto.email },
+      where: { email },
     });
 
-    if (!user) {
+    const valid = await bcrypt.compare(dto.password, user?.password ?? DUMMY_HASH);
+
+    if (!user || !valid) {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    const valid = await bcrypt.compare(dto.password, user.password);
-    if (!valid) {
-      throw new UnauthorizedException('Invalid credentials');
-    }
-
+    const { password, ...profile } = user;
     const token = this.jwtService.sign({ sub: user.id });
 
     return {
-      user: {
-        id: user.id,
-        email: user.email,
-        username: user.username,
-        name: user.name,
-        avatar: user.avatar,
-      },
+      user: profile,
       token,
     };
   }
@@ -84,19 +82,17 @@ export class AuthService {
   async getProfile(userId: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
+      select: { ...PROFILE_SELECT, createdAt: true },
     });
 
     if (!user) {
       throw new UnauthorizedException('User not found');
     }
 
-    return {
-      id: user.id,
-      email: user.email,
-      username: user.username,
-      name: user.name,
-      avatar: user.avatar,
-      createdAt: user.createdAt,
-    };
+    return user;
+  }
+
+  async requestPasswordReset() {
+    throw new ServiceUnavailableException('Password reset is not available yet. Contact support to recover your account.');
   }
 }

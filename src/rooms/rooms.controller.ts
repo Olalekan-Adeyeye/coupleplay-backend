@@ -3,12 +3,15 @@ import {
   Post,
   Get,
   Param,
+  Query,
   Body,
   UseGuards,
   Req,
 } from '@nestjs/common';
 import { RoomsService } from './rooms.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { CreateRoomDto } from './dto/create-room.dto';
+import { GetActiveRoomQueryDto } from './dto/get-active-room-query.dto';
 
 @Controller('rooms')
 @UseGuards(JwtAuthGuard)
@@ -16,20 +19,18 @@ export class RoomsController {
   constructor(private roomsService: RoomsService) {}
 
   @Post()
-  create(
-    @Req() req: any,
-    @Body() body: { coupleId: string; gameType: string; totalRounds?: number },
-  ) {
+  create(@Req() req: any, @Body() dto: CreateRoomDto) {
     return this.roomsService.createRoom(
-      body.coupleId,
-      body.gameType,
-      body.totalRounds ?? 5,
+      dto.coupleId,
+      dto.gameType,
+      dto.totalRounds ?? 5,
+      req.user.id,
     );
   }
 
-  @Get('active/:coupleId')
-  getActive(@Param('coupleId') coupleId: string) {
-    return this.roomsService.getActiveRoom(coupleId);
+  @Get('active')
+  getActive(@Req() req: any, @Query() query: GetActiveRoomQueryDto) {
+    return this.roomsService.getActiveRoom(req.user.id, query.gameType);
   }
 
   @Get(':id')

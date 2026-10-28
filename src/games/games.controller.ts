@@ -1,4 +1,4 @@
-import { Controller, Get, Param } from '@nestjs/common';
+import { Controller, Get, Param, NotFoundException } from '@nestjs/common';
 import { GamesService } from './games.service';
 
 @Controller('games')
@@ -12,6 +12,8 @@ export class GamesController {
 
   @Get(':id')
   getGame(@Param('id') id: string) {
-    return this.gamesService.getGame(id);
+    const game = this.gamesService.getGame(id);
+    if (!game) throw new NotFoundException('Game not found');
+    return game;
   }
 }

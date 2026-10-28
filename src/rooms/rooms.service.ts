@@ -2,14 +2,23 @@ import {
   Injectable,
   NotFoundException,
   ForbiddenException,
+  BadRequestException,
 } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
+
+const VALID_STATUSES = ['WAITING', 'IN_PROGRESS', 'FINISHED'] as const;
 
 @Injectable()
 export class RoomsService {
   constructor(private prisma: PrismaService) {}
 
-  async createRoom(coupleId: string, gameType: string, totalRounds: number) {
+  async createRoom(coupleId: string, gameType: string, totalRounds: number, userId: string) {
+    const couple = await this.prisma.couple.findUnique({ where: { id: coupleId } });
+    if (!couple) throw new NotFoundException('Couple not found');
+    if (couple.userAId !== userId && couple.userBId !== userId) {
+      throw new ForbiddenException('Not a member of this couple');
+    }
+
     return this.prisma.gameRoom.create({
       data: {
         coupleId,
@@ -21,13 +30,35 @@ export class RoomsService {
     });
   }
 
+  async assertRoomMembership(roomId: string, userId: string) {
+    const room = await this.prisma.gameRoom.findUnique({
+      where: { id: roomId },
+      select: { couple: { select: { userAId: true, userBId: true } } },
+    });
+    if (!room) throw new NotFoundException('Room not found');
+
+    const { userAId, userBId } = room.couple;
+    if (userAId !== userId && userBId !== userId) {
+      throw new ForbiddenException('Not in this room');
+    }
+  }
+
   async getRoom(roomId: string, userId: string) {
     const room = await this.prisma.gameRoom.findUnique({
       where: { id: roomId },
       include: {
         couple: true,
         players: true,
-        rounds: true,
+        rounds: {
+          select: {
+            id: true,
+            roundNumber: true,
+            state: true,
+            startedAt: true,
+            endedAt: true,
+          },
+          orderBy: { roundNumber: 'asc' },
+        },
       },
     });
 
@@ -40,11 +71,18 @@ export class RoomsService {
     return room;
   }
 
-  async getActiveRoom(coupleId: string) {
+  async getActiveRoom(userId: string, gameType?: string) {
+    const couple = await this.prisma.couple.findFirst({
+      where: { OR: [{ userAId: userId }, { userBId: userId }] },
+      select: { id: true },
+    });
+    if (!couple) return null;
+
     return this.prisma.gameRoom.findFirst({
       where: {
-        coupleId,
+        coupleId: couple.id,
         status: { in: ['WAITING', 'READY', 'IN_PROGRESS'] },
+        ...(gameType ? { gameType } : {}),
       },
     });
   }
@@ -61,12 +99,12 @@ export class RoomsService {
       room.couple.userAId === userId || room.couple.userBId === userId;
     if (!isMember) throw new ForbiddenException('Not in this couple');
 
-    let player = await this.prisma.gamePlayer.findUnique({
+    const player = await this.prisma.gamePlayer.findUnique({
       where: { roomId_userId: { roomId, userId } },
     });
 
     if (!player) {
-      player = await this.prisma.gamePlayer.create({
+      return this.prisma.gamePlayer.create({
         data: {
           roomId,
           userId,
@@ -75,28 +113,29 @@ export class RoomsService {
           connected: true,
         },
       });
-    } else {
-      // Reset ready flag — player must explicitly ready up in the new session
-      player = await this.prisma.gamePlayer.update({
-        where: { id: player.id },
-        data: { connected: true, ready: false },
-      });
     }
 
-    return player;
-  }
-
-  async playerReady(roomId: string, userId: string) {
-    await this.prisma.gamePlayer.update({
-      where: { roomId_userId: { roomId, userId } },
-      data: { ready: true },
+    // Reset ready flag — player must explicitly ready up in the new session
+    return this.prisma.gamePlayer.update({
+      where: { id: player.id },
+      data: { connected: true, ready: false },
     });
   }
 
+  async playerReady(roomId: string, userId: string) {
+    try {
+      return await this.prisma.gamePlayer.update({
+        where: { roomId_userId: { roomId, userId } },
+        data: { ready: true },
+      });
+    } catch {
+      throw new NotFoundException('You are not a player in this room');
+    }
+  }
+
   async setRoomStatus(roomId: string, status: string) {
-    const valid = ['WAITING', 'IN_PROGRESS', 'FINISHED'] as const;
-    if (!valid.includes(status as any)) {
-      return;
+    if (!VALID_STATUSES.includes(status as any)) {
+      throw new BadRequestException(`Invalid room status: ${status}`);
     }
 
     return this.prisma.gameRoom.update({
