@@ -1,4 +1,4 @@
-import { Controller, Get, UseGuards, Req } from '@nestjs/common';
+import { Controller, Get, Query, UseGuards, Req } from '@nestjs/common';
 import { StatsService } from './stats.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { PrismaService } from '../database/prisma.service';
@@ -38,7 +38,11 @@ export class StatsController {
   }
 
   @Get('activity')
-  async getActivity(@Req() req: any) {
+  async getActivity(
+    @Req() req: any,
+    @Query('cursor') cursor?: string,
+    @Query('limit') limit?: string,
+  ) {
     const couple = await this.prisma.couple.findFirst({
       where: {
         OR: [
@@ -53,14 +57,20 @@ export class StatsController {
     });
 
     if (!couple) {
-      return [];
+      return { groups: [], nextCursor: null };
     }
 
     const partner =
       couple.userAId === req.user.id ? couple.userB : couple.userA;
     const partnerName = partner?.name?.split(' ')[0] ?? 'Partner';
 
-    return this.statsService.getActivity(couple.id, req.user.id, partnerName);
+    return this.statsService.getActivity(
+      couple.id,
+      req.user.id,
+      partnerName,
+      cursor,
+      limit ? Number(limit) : undefined,
+    );
   }
 
   @Get('achievements')

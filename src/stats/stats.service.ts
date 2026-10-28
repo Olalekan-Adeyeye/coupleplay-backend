@@ -13,9 +13,20 @@ const DEFAULT_GAME_ICON = { icon: 'gamepad-variant', color: '#946BFF', bg: '#EFE
 export class StatsService {
   constructor(private prisma: PrismaService) {}
 
+  private playedRoomsWhere(coupleId: string, userId: string) {
+    return {
+      coupleId,
+      status: 'FINISHED',
+      AND: [
+        { players: { some: { userId } } },
+        { players: { some: { userId: { not: userId } } } },
+      ],
+    };
+  }
+
   async getOverview(coupleId: string, userId: string) {
     const rooms = await this.prisma.gameRoom.findMany({
-      where: { coupleId, status: 'FINISHED' },
+      where: this.playedRoomsWhere(coupleId, userId),
       include: { players: true },
       orderBy: { finishedAt: 'desc' },
     });
@@ -38,16 +49,14 @@ export class StatsService {
     let xp = 0;
 
     for (const room of rooms) {
-      const userPlayer = room.players.find((p) => p.userId === userId);
-      const partnerPlayer = room.players.find((p) => p.userId !== userId);
+      const userPlayer = room.players.find((p) => p.userId === userId)!;
+      const partnerPlayer = room.players.find((p) => p.userId !== userId)!;
 
-      if (userPlayer) xp += userPlayer.score;
+      xp += userPlayer.score;
 
-      if (userPlayer && partnerPlayer) {
-        if (userPlayer.score > partnerPlayer.score) wins++;
-        else if (userPlayer.score < partnerPlayer.score) losses++;
-        else draws++;
-      }
+      if (userPlayer.score > partnerPlayer.score) wins++;
+      else if (userPlayer.score < partnerPlayer.score) losses++;
+      else draws++;
     }
 
     const winRate = totalGames > 0 ? Math.round((wins / totalGames) * 100) : 0;
@@ -65,48 +74,67 @@ export class StatsService {
     };
   }
 
-  async getActivity(coupleId: string, userId: string, partnerName: string) {
+  async getActivity(
+    coupleId: string,
+    userId: string,
+    partnerName: string,
+    cursor?: string,
+    limit = 20,
+  ) {
+    const pageSize = Math.min(Math.max(limit, 1), 50);
     const rooms = await this.prisma.gameRoom.findMany({
-      where: { coupleId, status: 'FINISHED' },
+      where: {
+        ...this.playedRoomsWhere(coupleId, userId),
+        ...(cursor ? { finishedAt: { lt: new Date(cursor) } } : {}),
+      },
       include: { players: true },
       orderBy: { finishedAt: 'desc' },
-      take: 50,
+      take: pageSize + 1,
     });
+
+    const hasMore = rooms.length > pageSize;
+    const page = hasMore ? rooms.slice(0, pageSize) : rooms;
+    const lastFinishedAt = page.length
+      ? page[page.length - 1].finishedAt
+      : null;
+    const nextCursor = hasMore && lastFinishedAt
+      ? lastFinishedAt.toISOString()
+      : null;
 
     const grouped: Record<string, any[]> = {};
 
-    for (const room of rooms) {
-      const finishedAt = room.finishedAt ? new Date(room.finishedAt) : new Date();
+    for (const room of page) {
+      const finishedAt = new Date(
+        room.finishedAt ?? room.startedAt ?? room.createdAt,
+      );
       const dayKey = this.getDayKey(finishedAt);
 
       if (!grouped[dayKey]) grouped[dayKey] = [];
 
-      const userPlayer = room.players.find((p) => p.userId === userId);
-      const partnerPlayer = room.players.find((p) => p.userId !== userId);
+      const userPlayer = room.players.find((p) => p.userId === userId)!;
+      const partnerPlayer = room.players.find((p) => p.userId !== userId)!;
 
       const gameInfo = GAME_ICONS[room.gameType] || DEFAULT_GAME_ICON;
-      let title = '';
+      let title: string;
       let icon = gameInfo.icon;
       let color = gameInfo.color;
       let bg = gameInfo.bg;
 
-      if (userPlayer && partnerPlayer) {
-        if (userPlayer.score > partnerPlayer.score) {
-          title = `You won ${this.formatGameType(room.gameType)}`;
-          icon = 'trophy-outline';
-          color = '#8A4BE0';
-          bg = '#EFEAFF';
-        } else if (userPlayer.score < partnerPlayer.score) {
-          title = `${partnerName} won ${this.formatGameType(room.gameType)}`;
-          icon = 'trophy-outline';
-          color = '#FF69B4';
-          bg = '#FFE4F1';
-        } else {
-          title = `${this.formatGameType(room.gameType)} draw!`;
-          icon = 'handshake';
-          color = '#F59E0B';
-          bg = '#FEF3C7';
-        }
+      if (userPlayer.score > partnerPlayer.score) {
+        title = `You won ${this.formatGameType(room.gameType)}`;
+        icon = 'trophy-outline';
+        color = '#8A4BE0';
+        bg = '#EFEAFF';
+      } else if (userPlayer.score < partnerPlayer.score) {
+        title = `${partnerName} won ${this.formatGameType(room.gameType)}`;
+        icon = 'trophy-outline';
+        color = '#FF69B4';
+        bg = '#FFE4F1';
+      } else {
+        title = `${this.formatGameType(room.gameType)} draw!`;
+        icon = 'handshake';
+        color = '#F59E0B';
+        bg = '#FEF3C7';
       }
 
       const timeStr = finishedAt.toLocaleTimeString('en-US', {
@@ -162,12 +190,12 @@ export class StatsService {
       result.push({ day: 'Earlier', items: earlier });
     }
 
-    return result;
+    return { groups: result, nextCursor };
   }
 
   async getAchievements(coupleId: string, userId: string) {
     const rooms = await this.prisma.gameRoom.findMany({
-      where: { coupleId, status: 'FINISHED' },
+      where: this.playedRoomsWhere(coupleId, userId),
       include: { players: true, rounds: { select: { data: true } } },
       orderBy: { finishedAt: 'desc' },
     });
@@ -182,8 +210,8 @@ export class StatsService {
     let weekendWarrior = false;
 
     for (const room of rooms) {
-      const userPlayer = room.players.find((p) => p.userId === userId);
-      const partnerPlayer = room.players.find((p) => p.userId !== userId);
+      const userPlayer = room.players.find((p) => p.userId === userId)!;
+      const partnerPlayer = room.players.find((p) => p.userId !== userId)!;
 
       gameTypesPlayed.add(room.gameType);
 
@@ -197,7 +225,7 @@ export class StatsService {
         if (day === 0 || day === 6) weekendWarrior = true;
       }
 
-      if (userPlayer && partnerPlayer && userPlayer.score > partnerPlayer.score) {
+      if (userPlayer.score > partnerPlayer.score) {
         const userRoundsWon = room.rounds.filter((r) => {
           if (!r.data) return false;
           try {
@@ -235,7 +263,7 @@ export class StatsService {
         color: '#8A4BE0',
         category: 'milestone',
         condition: overview.totalGames >= 10,
-        progress: Math.min(100, (overview.totalGames / 10) * 100),
+        progress: this.percent(overview.totalGames, 10),
         unlockedAt: overview.totalGames >= 10 ? this.findUnlockDate(rooms, 10) : null,
       },
       {
@@ -246,7 +274,7 @@ export class StatsService {
         color: '#22C55E',
         category: 'milestone',
         condition: overview.totalGames >= 50,
-        progress: Math.min(100, (overview.totalGames / 50) * 100),
+        progress: this.percent(overview.totalGames, 50),
         unlockedAt: overview.totalGames >= 50 ? this.findUnlockDate(rooms, 50) : null,
       },
       {
@@ -257,7 +285,7 @@ export class StatsService {
         color: '#F59E0B',
         category: 'milestone',
         condition: overview.totalGames >= 100,
-        progress: Math.min(100, (overview.totalGames / 100) * 100),
+        progress: this.percent(overview.totalGames, 100),
         unlockedAt: overview.totalGames >= 100 ? this.findUnlockDate(rooms, 100) : null,
       },
       {
@@ -268,7 +296,7 @@ export class StatsService {
         color: '#F59E0B',
         category: 'milestone',
         condition: winStreak >= 3,
-        progress: Math.min(100, (winStreak / 3) * 100),
+        progress: this.percent(winStreak, 3),
         unlockedAt: winStreak >= 3 ? rooms[0]?.finishedAt?.toISOString() ?? null : null,
       },
       {
@@ -279,7 +307,7 @@ export class StatsService {
         color: '#EF4444',
         category: 'milestone',
         condition: winStreak >= 7,
-        progress: Math.min(100, (winStreak / 7) * 100),
+        progress: this.percent(winStreak, 7),
         unlockedAt: winStreak >= 7 ? rooms[0]?.finishedAt?.toISOString() ?? null : null,
       },
       {
@@ -290,7 +318,7 @@ export class StatsService {
         color: '#F59E0B',
         category: 'milestone',
         condition: overview.xp >= 100,
-        progress: Math.min(100, (overview.xp / 100) * 100),
+        progress: this.percent(overview.xp, 100),
         unlockedAt: overview.xp >= 100 ? this.findUnlockDateByXp(rooms, userId, 100) : null,
       },
       {
@@ -301,7 +329,7 @@ export class StatsService {
         color: '#8A4BE0',
         category: 'milestone',
         condition: overview.xp >= 500,
-        progress: Math.min(100, (overview.xp / 500) * 100),
+        progress: this.percent(overview.xp, 500),
         unlockedAt: overview.xp >= 500 ? this.findUnlockDateByXp(rooms, userId, 500) : null,
       },
       {
@@ -312,7 +340,7 @@ export class StatsService {
         color: '#FF69B4',
         category: 'milestone',
         condition: overview.xp >= 1000,
-        progress: Math.min(100, (overview.xp / 1000) * 100),
+        progress: this.percent(overview.xp, 1000),
         unlockedAt: overview.xp >= 1000 ? this.findUnlockDateByXp(rooms, userId, 1000) : null,
       },
       // Win milestones
@@ -335,7 +363,7 @@ export class StatsService {
         color: '#F59E0B',
         category: 'milestone',
         condition: overview.wins >= 10,
-        progress: Math.min(100, (overview.wins / 10) * 100),
+        progress: this.percent(overview.wins, 10),
         unlockedAt: overview.wins >= 10 ? this.findNthWinDate(rooms, userId, 10) : null,
       },
       {
@@ -346,7 +374,7 @@ export class StatsService {
         color: '#8A4BE0',
         category: 'milestone',
         condition: overview.wins >= 25,
-        progress: Math.min(100, (overview.wins / 25) * 100),
+        progress: this.percent(overview.wins, 25),
         unlockedAt: overview.wins >= 25 ? this.findNthWinDate(rooms, userId, 25) : null,
       },
       {
@@ -357,7 +385,7 @@ export class StatsService {
         color: '#EF4444',
         category: 'milestone',
         condition: overview.wins >= 50,
-        progress: Math.min(100, (overview.wins / 50) * 100),
+        progress: this.percent(overview.wins, 50),
         unlockedAt: overview.wins >= 50 ? this.findNthWinDate(rooms, userId, 50) : null,
       },
       // Special
@@ -413,7 +441,7 @@ export class StatsService {
         color: '#22C55E',
         category: 'special',
         condition: gameTypesPlayed.size >= 3,
-        progress: Math.min(100, (gameTypesPlayed.size / 3) * 100),
+        progress: this.percent(gameTypesPlayed.size, 3),
         unlockedAt: gameTypesPlayed.size >= 3 ? this.findVarietyUnlockDate(rooms) : null,
       },
     ];
@@ -535,9 +563,9 @@ export class StatsService {
   private calculateWinStreak(rooms: any[], userId: string): number {
     let streak = 0;
     for (const room of rooms) {
-      const userPlayer = room.players.find((p: any) => p.userId === userId);
-      const partnerPlayer = room.players.find((p: any) => p.userId !== userId);
-      if (userPlayer && partnerPlayer && userPlayer.score > partnerPlayer.score) {
+      const userPlayer = room.players.find((p: any) => p.userId === userId)!;
+      const partnerPlayer = room.players.find((p: any) => p.userId !== userId)!;
+      if (userPlayer.score > partnerPlayer.score) {
         streak++;
       } else {
         break;
@@ -560,6 +588,11 @@ export class StatsService {
     if (dateOnly.getTime() === yesterday.getTime()) return 'Yesterday';
 
     return dateOnly.toISOString().split('T')[0];
+  }
+
+  private percent(value: number, target: number): number {
+    if (target <= 0) return 0;
+    return Math.min(100, Math.round((value / target) * 100));
   }
 
   private formatGameType(type: string): string {
