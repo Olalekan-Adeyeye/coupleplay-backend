@@ -20,6 +20,16 @@ export class StatsService {
       orderBy: { finishedAt: 'desc' },
     });
 
+    return this.overviewFromRooms(rooms, userId);
+  }
+
+  private overviewFromRooms(
+    rooms: Array<{
+      finishedAt: Date | null;
+      players: Array<{ userId: string; score: number }>;
+    }>,
+    userId: string,
+  ) {
     const totalGames = rooms.length;
 
     let wins = 0;
@@ -42,7 +52,7 @@ export class StatsService {
 
     const winRate = totalGames > 0 ? Math.round((wins / totalGames) * 100) : 0;
 
-    const streak = this.calculateStreak(rooms, userId);
+    const streak = this.calculateStreak(rooms as any[], userId);
 
     return {
       streak,
@@ -158,11 +168,11 @@ export class StatsService {
   async getAchievements(coupleId: string, userId: string) {
     const rooms = await this.prisma.gameRoom.findMany({
       where: { coupleId, status: 'FINISHED' },
-      include: { players: true, rounds: true },
+      include: { players: true, rounds: { select: { data: true } } },
       orderBy: { finishedAt: 'desc' },
     });
 
-    const overview = await this.getOverview(coupleId, userId);
+    const overview = await this.overviewFromRooms(rooms, userId);
     const winStreak = this.calculateWinStreak(rooms, userId);
 
     let perfectGames = 0;
